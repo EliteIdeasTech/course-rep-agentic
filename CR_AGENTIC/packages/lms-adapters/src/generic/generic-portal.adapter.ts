@@ -147,30 +147,62 @@ export class GenericPortalAdapter implements ILmsAdapter {
     config: GenericPortalConfig = DEFAULT_CONFIG,
   ): Promise<LmsCourse[]> {
     const start = page.url();
-    const paths = [
-      '?pg=home',
-      '?pg=course-registration',
-      config.paths?.courses ?? '/courses',
-      '/course-registration',
-      '/dashboard',
-    ];
     const courseSelector = config.selectors?.courseLink ?? DEFAULT_CONFIG.selectors!.courseLink!;
     const titleSelector = config.selectors?.courseTitle ?? DEFAULT_CONFIG.selectors!.courseTitle!;
     const courses: LmsCourse[] = [];
-    const junkTitle =
-      /download your course material|course registration|hostel|biodata|fee payment|telegram|twitter|dashboard|helpdesk|settings/i;
+    const seen = new Set<string>();
 
-    for (const path of paths) {
+    const pushCourse = (c: LmsCourse) => {
+      const key = `${(c.code || '').toLowerCase()}|${c.title.toLowerCase()}|${c.externalId}`;
+      if (!c.title || seen.has(key)) return;
+      seen.add(key);
+      courses.push(c);
+    };
+
+    // Follow academic nav targets already in the DOM. Collapsed side menus are
+    // often off-canvas but still present — no hamburger click required.
+    const navHrefs = await this.collectAcademicNavHrefs(page).catch(() => [] as string[]);
+
+    const pathProbes = [
+      config.paths?.courses ?? '/courses',
+      '/course_registration',
+      '/course_registration/view',
+      '/course_registration/register',
+      '/course_registration/session',
+      '/course-registration',
+      '/course-registration/view',
+      '/courses',
+      '/dashboard',
+      '?pg=home',
+      '?pg=course-registration',
+      '?pg=courses',
+    ];
+
+    const targets: string[] = [];
+    for (const href of navHrefs) {
+      if (/course|regist/i.test(href)) targets.push(href);
+    }
+    for (const path of pathProbes) {
       try {
-        const target = path.startsWith('?')
-          ? this.withQuery(start, path)
-          : new URL(path, start).toString();
-        await page.goto(target, { waitUntil: 'domcontentloaded', timeout: 20_000 });
-        await page.waitForTimeout(800);
+        targets.push(
+          path.startsWith('?')
+            ? this.withQuery(start, path)
+            : new URL(path, start).toString(),
+        );
+      } catch {
+        // ignore bad path
+      }
+    }
+
+    for (const target of Array.from(new Set(targets))) {
+      try {
+        await page.goto(target, { waitUntil: 'domcontentloaded', timeout: 25_000 });
+        await page.waitForTimeout(1_200);
         const text = ((await page.locator('body').innerText().catch(() => '')) || '').toLowerCase();
-        if (/access is restricted/i.test(text)) {
-          continue;
-        }
+        if (/access is restricted/i.test(text)) continue;
+
+        for (const c of await this.extractCoursesFromTables(page)) pushCourse(c);
+
         const elements = await page.locator(courseSelector).all();
         for (let i = 0; i < elements.length; i++) {
           const el = elements[i];
@@ -180,33 +212,32 @@ export class GenericPortalAdapter implements ILmsAdapter {
             (await titleEl.count()) > 0
               ? (await titleEl.textContent())?.trim()
               : (await el.textContent())?.trim();
-          if (!title || junkTitle.test(title)) continue;
-          courses.push({
+          if (!title || this.isNavJunkTitle(title)) continue;
+          pushCourse({
             externalId: href,
             title: title.replace(/\s+/g, ' ').trim(),
             url: new URL(href, page.url()).toString(),
           });
         }
+
         if (courses.length > 0) return courses;
       } catch {
-        // try next
+        // try next target
       }
     }
 
-    // Fallback: treat programme line on dashboard as a synthetic enrolled programme.
+    // Fallback: programme line on dashboard / portal home.
     try {
-      await page.goto(this.withQuery(start, '?pg=home'), {
-        waitUntil: 'domcontentloaded',
-        timeout: 20_000,
-      });
+      await page.goto(start, { waitUntil: 'domcontentloaded', timeout: 20_000 });
+      await page.waitForTimeout(800);
       const text = ((await page.locator('body').innerText().catch(() => '')) || '').trim();
-      const prog = /ND\s*\([^)]+\)[^\n]*/i.exec(text)?.[0]?.trim();
-      const matric = /F\/[A-Z0-9/]+/i.exec(text)?.[0];
+      const prog =
+        /(?:ND|HND|B\.?\s*Sc|B\.?\s*Eng|M\.?\s*Sc)\s*\([^)]+\)[^\n]*/i.exec(text)?.[0]?.trim();
+      const matric = /\b([A-Z]\/[A-Z0-9/]+)\b/i.exec(text)?.[1];
       if (prog) {
-        courses.push({
+        pushCourse({
           externalId: matric ? `programme:${matric}` : 'programme:current',
           title: prog,
-          code: undefined,
         });
       }
     } catch {
@@ -312,6 +343,77 @@ export class GenericPortalAdapter implements ILmsAdapter {
       }
     }
     return null;
+  }
+
+
+
+  /** Nav chrome titles — not enrolled courses. */
+  private isNavJunkTitle(title: string): boolean {
+    return /download your course material|course registration|course management|hostel|biodata|fee payment|school fees|telegram|twitter|dashboard|helpdesk|settings|acceptance|logout|modules|reports|school setup/i.test(
+      title.trim(),
+    );
+  }
+
+  /**
+   * Collect academic destinations from ALL anchors in the DOM, including those
+   * inside collapsed/off-canvas side menus (no click needed if href exists).
+   */
+  private async collectAcademicNavHrefs(page: Page): Promise<string[]> {
+    // String form avoids needing DOM libs in the Node TS project.
+    return page.evaluate(`(() => {
+      const textRe = /course\\s*reg|registered\\s*course|my\\s*courses?|results?|transcript|time\\s*table|timetable|biodata|profile|lecture/i;
+      const hrefRe = /course[_-]?reg|registered|\\/courses(?:\\/|$)|\\/results?(?:\\/|$)|timetable|transcript|biodata|lecture/i;
+      const out = [];
+      for (const a of Array.from(document.querySelectorAll('a[href]'))) {
+        const text = (a.textContent || '').replace(/\\s+/g, ' ').trim();
+        const href = a.getAttribute('href') || '';
+        if (!href || href.startsWith('javascript:') || href === '#') continue;
+        if (textRe.test(text) || hrefRe.test(href)) {
+          try { out.push(new URL(href, location.href).toString()); } catch (e) {}
+        }
+      }
+      return Array.from(new Set(out));
+    })()`) as Promise<string[]>;
+  }
+
+  /** Parse course code/title rows from tables and plain text lines. */
+  private async extractCoursesFromTables(page: Page): Promise<LmsCourse[]> {
+    return page.evaluate(`(() => {
+      const codeRe = /^[A-Z]{2,4}\\s*\\d{2,4}[A-Z]?$/i;
+      const out = [];
+      const seen = new Set();
+      const add = (code, title) => {
+        const t = (title || '').replace(/\\s+/g, ' ').trim();
+        if (!t || t.length < 3) return;
+        const key = ((code || '') + '|' + t).toLowerCase();
+        if (seen.has(key)) return;
+        seen.add(key);
+        out.push({
+          externalId: code ? ('course:' + code) : ('course:' + t.slice(0, 40)),
+          title: t,
+          code: code || undefined,
+        });
+      };
+      for (const tr of Array.from(document.querySelectorAll('table tr'))) {
+        const cells = Array.from(tr.querySelectorAll('td,th')).map((c) =>
+          (c.textContent || '').replace(/\\s+/g, ' ').trim(),
+        );
+        if (cells.length < 2) continue;
+        if (cells.some((c) => /^(s\\/n|sn|code|course\\s*code|title|course\\s*title)$/i.test(c))) continue;
+        const codeIdx = cells.findIndex((c) => codeRe.test(c));
+        if (codeIdx >= 0) {
+          const code = cells[codeIdx].toUpperCase().replace(/\\s+/g, ' ');
+          const title = cells.find((c, i) => i !== codeIdx && c.length > 3 && !/^\\d+(\\.\\d+)?$/.test(c)) || '';
+          add(code, title || code);
+        }
+      }
+      const body = (document.body && document.body.innerText) || '';
+      for (const line of body.split(/\\n/)) {
+        const m = /^\\s*([A-Z]{2,4}\\s*\\d{2,4}[A-Z]?)\\s*[-–:]\\s*(.+)$/i.exec(line.trim());
+        if (m) add(m[1].toUpperCase().replace(/\\s+/g, ' '), m[2]);
+      }
+      return out;
+    })()`) as Promise<LmsCourse[]>;
   }
 
   private withQuery(currentUrl: string, query: string): string {
