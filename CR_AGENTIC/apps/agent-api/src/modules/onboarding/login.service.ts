@@ -121,7 +121,20 @@ export class LoginService {
 
     await this.redis.set(credentialsRedisKey, encrypted, 'EX', CREDENTIALS_TTL_SEC);
 
-    await this.onboarding.transition(sessionId, session.stage, 'LOGIN_IN_PROGRESS');
+    // Credential submit is one-shot: clients often skip login/start. Advance
+    // PORTAL_CONFIRMED / REAUTH_REQUIRED -> AWAITING_LOGIN first.
+    let stage = session.stage as string;
+    if (stage === 'PORTAL_CONFIRMED' || stage === 'REAUTH_REQUIRED') {
+      await this.onboarding.transition(sessionId, stage, 'AWAITING_LOGIN');
+      stage = 'AWAITING_LOGIN';
+    }
+    if (stage !== 'AWAITING_LOGIN' && stage !== 'LOGIN_IN_PROGRESS') {
+      throw new BadRequestException(
+        `Cannot submit credentials from stage ${stage}`,
+      );
+    }
+
+    await this.onboarding.transition(sessionId, stage, 'LOGIN_IN_PROGRESS');
 
     await enqueueJob<BrowserCredentialLoginJob>(
       QUEUE_NAMES.BROWSER_CREDENTIAL_LOGIN,
