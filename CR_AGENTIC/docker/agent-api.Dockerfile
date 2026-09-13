@@ -1,4 +1,7 @@
 FROM node:20-bookworm-slim AS builder
+
+ARG CACHEBUST=20260913-cred-autostart
+RUN echo "cachebust=$CACHEBUST"
 WORKDIR /app
 COPY package.json yarn.lock tsconfig.base.json ./
 COPY packages ./packages
