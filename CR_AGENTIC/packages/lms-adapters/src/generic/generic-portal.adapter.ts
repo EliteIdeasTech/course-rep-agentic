@@ -1,4 +1,4 @@
-import type { Page } from 'playwright-core';
+import type { Page, Response } from 'playwright-core';
 import { LmsType } from '@cr-agentic/shared';
 import {
   GenericPortalConfig,
@@ -155,95 +155,117 @@ export class GenericPortalAdapter implements ILmsAdapter {
     const pushCourse = (c: LmsCourse) => {
       const key = `${(c.code || '').toLowerCase()}|${c.title.toLowerCase()}|${c.externalId}`;
       if (!c.title || seen.has(key)) return;
+      if (this.isNavJunkTitle(c.title)) return;
       seen.add(key);
       courses.push(c);
     };
 
-    // Follow academic nav targets already in the DOM. Collapsed side menus are
-    // often off-canvas but still present — no hamburger click required.
-    const navHrefs = await this.collectAcademicNavHrefs(page).catch(() => [] as string[]);
+    // Capture course-like JSON from XHR/fetch while we navigate (SPA portals).
+    const stopNetworkHarvest = this.startCourseNetworkHarvest(page, pushCourse);
 
-    const pathProbes = [
-      config.paths?.courses ?? '/courses',
-      '/course_registration',
-      '/course_registration/view',
-      '/course_registration/register',
-      '/course_registration/session',
-      '/course-registration',
-      '/course-registration/view',
-      '/courses',
-      '/dashboard',
-      '?pg=home',
-      '?pg=course-registration',
-      '?pg=courses',
-    ];
+    try {
+      await this.dismissBlockingOverlays(page);
 
-    const targets: string[] = [];
-    for (const href of navHrefs) {
-      if (/course|regist/i.test(href)) targets.push(href);
-    }
-    for (const path of pathProbes) {
-      try {
-        targets.push(
-          path.startsWith('?')
-            ? this.withQuery(start, path)
-            : new URL(path, start).toString(),
-        );
-      } catch {
-        // ignore bad path
+      // Ensure side-nav links exist in DOM; open hamburger if they do not.
+      let navHrefs = await this.collectAcademicNavHrefs(page).catch(() => [] as string[]);
+      if (navHrefs.length === 0) {
+        await this.openSideNavIfPresent(page);
+        await this.dismissBlockingOverlays(page);
+        navHrefs = await this.collectAcademicNavHrefs(page).catch(() => [] as string[]);
       }
-    }
 
-    for (const target of Array.from(new Set(targets))) {
+      const pathProbes = [
+        config.paths?.courses ?? '/courses',
+        '/course_registration',
+        '/course_registration/view',
+        '/course_registration/register',
+        '/course_registration/session',
+        '/course-registration',
+        '/course-registration/view',
+        '/courses',
+        '/dashboard',
+        '?pg=home',
+        '?pg=course-registration',
+        '?pg=courses',
+      ];
+
+      const targets: string[] = [];
+      for (const href of navHrefs) {
+        if (/course|regist/i.test(href)) targets.push(href);
+      }
+      for (const path of pathProbes) {
+        try {
+          targets.push(
+            path.startsWith('?')
+              ? this.withQuery(start, path)
+              : new URL(path, start).toString(),
+          );
+        } catch {
+          // ignore
+        }
+      }
+
+      for (const target of Array.from(new Set(targets))) {
+        try {
+          await page.goto(target, { waitUntil: 'domcontentloaded', timeout: 25_000 });
+          await page.waitForTimeout(1_200);
+          await this.dismissBlockingOverlays(page);
+
+          const text = ((await page.locator('body').innerText().catch(() => '')) || '').toLowerCase();
+          if (/access is restricted/i.test(text)) continue;
+
+          for (const c of await this.extractCoursesFromTables(page)) pushCourse(c);
+
+          // History tables (Session / Semester / Level + View): open each View.
+          const drilled = await this.drillIntoDetailViews(page, pushCourse);
+          if (drilled > 0 && courses.length > 0) {
+            return courses;
+          }
+
+          const elements = await page.locator(courseSelector).all();
+          for (let i = 0; i < elements.length; i++) {
+            const el = elements[i];
+            const href = (await el.getAttribute('href')) ?? `course-${i}`;
+            const titleEl = el.locator(titleSelector).first();
+            const title =
+              (await titleEl.count()) > 0
+                ? (await titleEl.textContent())?.trim()
+                : (await el.textContent())?.trim();
+            if (!title || this.isNavJunkTitle(title)) continue;
+            pushCourse({
+              externalId: href,
+              title: title.replace(/\s+/g, ' ').trim(),
+              url: new URL(href, page.url()).toString(),
+            });
+          }
+
+          if (courses.length > 0) return courses;
+        } catch {
+          // try next target
+        }
+      }
+
+      // Fallback: programme line on dashboard / portal home.
       try {
-        await page.goto(target, { waitUntil: 'domcontentloaded', timeout: 25_000 });
-        await page.waitForTimeout(1_200);
-        const text = ((await page.locator('body').innerText().catch(() => '')) || '').toLowerCase();
-        if (/access is restricted/i.test(text)) continue;
-
-        for (const c of await this.extractCoursesFromTables(page)) pushCourse(c);
-
-        const elements = await page.locator(courseSelector).all();
-        for (let i = 0; i < elements.length; i++) {
-          const el = elements[i];
-          const href = (await el.getAttribute('href')) ?? `course-${i}`;
-          const titleEl = el.locator(titleSelector).first();
-          const title =
-            (await titleEl.count()) > 0
-              ? (await titleEl.textContent())?.trim()
-              : (await el.textContent())?.trim();
-          if (!title || this.isNavJunkTitle(title)) continue;
+        await page.goto(start, { waitUntil: 'domcontentloaded', timeout: 20_000 });
+        await page.waitForTimeout(800);
+        const text = ((await page.locator('body').innerText().catch(() => '')) || '').trim();
+        const prog =
+          /(?:ND|HND|B\.?\s*Sc|B\.?\s*Eng|M\.?\s*Sc)\s*\([^)]+\)[^\n]*/i.exec(text)?.[0]?.trim();
+        const matric = /\b([A-Z]\/[A-Z0-9/]+)\b/i.exec(text)?.[1];
+        if (prog) {
           pushCourse({
-            externalId: href,
-            title: title.replace(/\s+/g, ' ').trim(),
-            url: new URL(href, page.url()).toString(),
+            externalId: matric ? `programme:${matric}` : 'programme:current',
+            title: prog,
           });
         }
-
-        if (courses.length > 0) return courses;
       } catch {
-        // try next target
+        // ignore
       }
+      return courses;
+    } finally {
+      stopNetworkHarvest();
     }
-
-    // Fallback: programme line on dashboard / portal home.
-    try {
-      await page.goto(start, { waitUntil: 'domcontentloaded', timeout: 20_000 });
-      await page.waitForTimeout(800);
-      const text = ((await page.locator('body').innerText().catch(() => '')) || '').trim();
-      const prog =
-        /(?:ND|HND|B\.?\s*Sc|B\.?\s*Eng|M\.?\s*Sc)\s*\([^)]+\)[^\n]*/i.exec(text)?.[0]?.trim();
-      const matric = /\b([A-Z]\/[A-Z0-9/]+)\b/i.exec(text)?.[1];
-      if (prog) {
-        pushCourse({
-          externalId: matric ? `programme:${matric}` : 'programme:current',
-          title: prog,
-        });
-      }
-    } catch {
-      // ignore
-    }
-    return courses;
   }
 
   async listAssignments(
@@ -346,6 +368,170 @@ export class GenericPortalAdapter implements ILmsAdapter {
   }
 
 
+
+
+  /** Close chat widgets / modals that block clicks on SPA portals. */
+  private async dismissBlockingOverlays(page: Page): Promise<void> {
+    const selectors = [
+      'button[aria-label*="close" i]',
+      'button[aria-label*="dismiss" i]',
+      '.modal.show [data-dismiss="modal"]',
+      '.modal.show .close',
+      '.modal.show button.close',
+      '[role="dialog"] button[aria-label*="close" i]',
+    ];
+    for (const sel of selectors) {
+      const loc = page.locator(sel).first();
+      if ((await loc.count().catch(() => 0)) > 0) {
+        await loc.click({ timeout: 1_500, force: true }).catch(() => undefined);
+      }
+    }
+    await page
+      .evaluate(`(() => {
+        const hide = (el) => { try { el.style.setProperty('display','none','important'); el.style.setProperty('pointer-events','none','important'); } catch (e) {} };
+        document.querySelectorAll('iframe[src*="zoho"], iframe[src*="chat"], #zohohc-asap-web-launcher-frame, .zh-chat, [class*="chat-widget"]').forEach(hide);
+        document.querySelectorAll('.modal-backdrop').forEach(hide);
+      })()`)
+      .catch(() => undefined);
+  }
+
+  /** Open hamburger / side drawer when academic links are not yet in the DOM. */
+  private async openSideNavIfPresent(page: Page): Promise<void> {
+    const candidates = [
+      'button.navbar-toggler',
+      'button[aria-label*="menu" i]',
+      'button[aria-label*="navigation" i]',
+      '[class*="hamburger"]',
+      'header button',
+      'nav button',
+    ];
+    for (const sel of candidates) {
+      const btn = page.locator(sel).first();
+      if ((await btn.count().catch(() => 0)) === 0) continue;
+      await btn.click({ timeout: 2_000 }).catch(() => undefined);
+      await page.waitForTimeout(600);
+      const hrefs = await this.collectAcademicNavHrefs(page).catch(() => [] as string[]);
+      if (hrefs.length > 0) return;
+    }
+  }
+
+  /**
+   * On registration history pages (Session/Semester/Level + View), open each
+   * detail View and harvest courses.
+   */
+  private async drillIntoDetailViews(
+    page: Page,
+    pushCourse: (c: LmsCourse) => void,
+  ): Promise<number> {
+    const body = ((await page.locator('body').innerText().catch(() => '')) || '').toLowerCase();
+    const looksLikeHistory =
+      (/session/.test(body) && /semester/.test(body)) ||
+      /registered courses history|course registration/i.test(body);
+    if (!looksLikeHistory) return 0;
+
+    const viewLocator = page.locator(
+      'table a:has-text("View"), table button:has-text("View"), table a:has-text("Details"), table button:has-text("Details"), a:has-text("View"), button:has-text("View")',
+    );
+    const count = Math.min(await viewLocator.count().catch(() => 0), 10);
+    if (count === 0) return 0;
+
+    let opened = 0;
+    for (let i = 0; i < count; i++) {
+      try {
+        await this.dismissBlockingOverlays(page);
+        const before = page.url();
+        const el = viewLocator.nth(i);
+        const href = await el.getAttribute('href').catch(() => null);
+        if (href && href !== '#' && !href.startsWith('javascript:')) {
+          await page.goto(new URL(href, page.url()).toString(), {
+            waitUntil: 'domcontentloaded',
+            timeout: 20_000,
+          });
+        } else {
+          await el.click({ timeout: 5_000 });
+          await page.waitForTimeout(1_500);
+        }
+        await this.dismissBlockingOverlays(page);
+        for (const c of await this.extractCoursesFromTables(page)) pushCourse(c);
+        opened += 1;
+
+        if (page.url() !== before) {
+          await page
+            .goto(before, { waitUntil: 'domcontentloaded', timeout: 20_000 })
+            .catch(() => undefined);
+          await page.waitForTimeout(800);
+        } else {
+          await page.goBack({ waitUntil: 'domcontentloaded' }).catch(() => undefined);
+          await page.waitForTimeout(800);
+        }
+      } catch {
+        // continue other rows
+      }
+    }
+    return opened;
+  }
+
+  /**
+   * Listen for XHR/fetch JSON that looks like enrolled courses (code + title).
+   */
+  private startCourseNetworkHarvest(
+    page: Page,
+    pushCourse: (c: LmsCourse) => void,
+  ): () => void {
+    const handler = async (res: Response) => {
+      try {
+        if (!res.ok()) return;
+        const url = res.url();
+        if (!/course|regist|academic|enroll/i.test(url)) return;
+        const ct = res.headers()['content-type'] || '';
+        if (ct && !/json|javascript|text\/plain/i.test(ct)) return;
+        const data = await res.json().catch(() => null);
+        if (!data) return;
+        for (const c of this.coursesFromUnknownJson(data)) pushCourse(c);
+      } catch {
+        // ignore
+      }
+    };
+    page.on('response', handler);
+    return () => page.off('response', handler);
+  }
+
+  private coursesFromUnknownJson(data: unknown): LmsCourse[] {
+    const out: LmsCourse[] = [];
+    const visit = (node: unknown, depth: number) => {
+      if (depth > 6 || node == null) return;
+      if (Array.isArray(node)) {
+        for (const item of node) visit(item, depth + 1);
+        return;
+      }
+      if (typeof node !== 'object') return;
+      const obj = node as Record<string, unknown>;
+      const codeRaw =
+        obj.courseCode ?? obj.CourseCode ?? obj.code ?? obj.Code ?? obj.course_code;
+      const titleRaw =
+        obj.courseTitle ??
+        obj.CourseTitle ??
+        obj.title ??
+        obj.Title ??
+        obj.courseName ??
+        obj.CourseName ??
+        obj.name;
+      const code = typeof codeRaw === 'string' ? codeRaw.trim() : undefined;
+      const title = typeof titleRaw === 'string' ? titleRaw.trim() : undefined;
+      if (title && (code || title.length > 5)) {
+        out.push({
+          externalId: code ? `course:${code}` : `course:${title.slice(0, 40)}`,
+          title,
+          code,
+        });
+      }
+      for (const v of Object.values(obj)) {
+        if (v && typeof v === 'object') visit(v, depth + 1);
+      }
+    };
+    visit(data, 0);
+    return out;
+  }
 
   /** Nav chrome titles — not enrolled courses. */
   private isNavJunkTitle(title: string): boolean {
