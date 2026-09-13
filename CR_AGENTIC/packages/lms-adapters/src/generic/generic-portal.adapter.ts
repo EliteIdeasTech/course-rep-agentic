@@ -166,6 +166,12 @@ export class GenericPortalAdapter implements ILmsAdapter {
     try {
       await this.dismissBlockingOverlays(page);
 
+      // SPA portals (School Manager etc.): pull courses via authenticated APIs.
+      for (const c of await this.harvestCoursesFromSpaApis(page).catch(() => [] as LmsCourse[])) {
+        pushCourse(c);
+      }
+      if (courses.length > 0) return courses;
+
       // Ensure side-nav links exist in DOM; open hamburger if they do not.
       let navHrefs = await this.collectAcademicNavHrefs(page).catch(() => [] as string[]);
       if (navHrefs.length === 0) {
@@ -369,6 +375,180 @@ export class GenericPortalAdapter implements ILmsAdapter {
 
 
 
+
+
+  /**
+   * Generic SPA course harvest: find a Bearer JWT in web storage, discover /api
+   * bases from performance entries, then call common registration history +
+   * registered-courses endpoints (School Manager pattern used by many NG schools).
+   */
+  private async harvestCoursesFromSpaApis(page: Page): Promise<LmsCourse[]> {
+    // Visit dashboard first so the SPA hydrates storage + fires API calls.
+    try {
+      const dash = new URL('/dashboard', page.url()).toString();
+      await page.goto(dash, { waitUntil: 'domcontentloaded', timeout: 25_000 }).catch(() => undefined);
+      await page.waitForTimeout(2_000);
+      await this.dismissBlockingOverlays(page);
+    } catch {
+      // continue with current page
+    }
+
+    return page.evaluate(`(async () => {
+      const out = [];
+      const seen = new Set();
+      const add = (code, title) => {
+        const t = (title || '').toString().replace(/\\s+/g, ' ').trim();
+        if (!t || t.length < 3) return;
+        const c = code ? String(code).replace(/\\s+/g, ' ').trim() : '';
+        const key = (c + '|' + t).toLowerCase();
+        if (seen.has(key)) return;
+        seen.add(key);
+        out.push({
+          externalId: c ? ('course:' + c) : ('course:' + t.slice(0, 40)),
+          title: t,
+          code: c || undefined,
+        });
+      };
+
+      const findJwt = (node, depth) => {
+        if (node == null || depth > 10) return null;
+        if (typeof node === 'string') {
+          if (/^eyJ[A-Za-z0-9_-]+\\.[A-Za-z0-9_-]+\\.[A-Za-z0-9_-]+$/.test(node)) return node;
+          try { return findJwt(JSON.parse(node), depth + 1); } catch (e) { return null; }
+        }
+        if (typeof node !== 'object') return null;
+        if (typeof node.token === 'string' && node.token.length > 20) {
+          if (/^eyJ/.test(node.token) || node.token.length > 40) return node.token;
+        }
+        if (node.jwtToken) {
+          const t = findJwt(node.jwtToken, depth + 1);
+          if (t) return t;
+        }
+        for (const v of Object.values(node)) {
+          const t = findJwt(v, depth + 1);
+          if (t) return t;
+        }
+        return null;
+      };
+
+      let token = null;
+      try {
+        for (let i = 0; i < localStorage.length; i++) {
+          const k = localStorage.key(i);
+          const v = localStorage.getItem(k);
+          token = findJwt(v, 0);
+          if (token) break;
+        }
+      } catch (e) {}
+      try {
+        if (!token) {
+          for (let i = 0; i < sessionStorage.length; i++) {
+            const k = sessionStorage.key(i);
+            const v = sessionStorage.getItem(k);
+            token = findJwt(v, 0);
+            if (token) break;
+          }
+        }
+      } catch (e) {}
+
+      const bases = new Set();
+      try {
+        performance.getEntriesByType('resource').forEach((e) => {
+          const m = String(e.name).match(/^(https?:\\/\\/[^/]+\\/api)\\b/i);
+          if (m) bases.add(m[1]);
+        });
+      } catch (e) {}
+      // Same-origin fallback; many portals proxy /api.
+      bases.add(location.origin.replace(/\\/$/, '') + '/api');
+
+      // School Manager family: schmgr-{school}.azurewebsites.net/api
+      try {
+        const host = location.hostname.replace(/^www\./i, '');
+        const core = host.replace(/^(portal|studentportal|students|myportal)\./i, '');
+        const school = core.split('.')[0];
+        if (school && school.length >= 2) {
+          bases.add('https://schmgr-' + school + '.azurewebsites.net/api');
+        }
+      } catch (e) {}
+
+
+      const headers = { Accept: 'application/json' };
+      if (token) headers.Authorization = 'Bearer ' + token;
+
+      const asList = (j) => {
+        if (!j) return [];
+        if (Array.isArray(j)) return j;
+        if (Array.isArray(j.data)) return j.data;
+        if (Array.isArray(j.result)) return j.result;
+        if (Array.isArray(j.items)) return j.items;
+        if (j.data && Array.isArray(j.data.items)) return j.data.items;
+        if (j.data && Array.isArray(j.data.courses)) return j.data.courses;
+        if (Array.isArray(j.courses)) return j.courses;
+        return [];
+      };
+
+      const walkCourses = (node, depth) => {
+        if (!node || depth > 8) return;
+        if (Array.isArray(node)) { node.forEach((x) => walkCourses(x, depth + 1)); return; }
+        if (typeof node !== 'object') return;
+        const code = node.courseCode || node.CourseCode || node.code || node.Code || node.course_code;
+        const title = node.courseTitle || node.CourseTitle || node.title || node.Title || node.courseName || node.CourseName || node.name;
+        if (typeof title === 'string' && title.trim().length > 2) {
+          if (code || title.trim().length > 5) add(code, title);
+        }
+        Object.values(node).forEach((v) => {
+          if (v && typeof v === 'object') walkCourses(v, depth + 1);
+        });
+      };
+
+      for (const base of Array.from(bases)) {
+        const b = String(base).replace(/\\/$/, '');
+        // Dashboard payload sometimes embeds course summaries.
+        for (const path of ['/Dashboard/getstudentdashboard', '/dashboard/getstudentdashboard']) {
+          try {
+            const r = await fetch(b + path, { headers: headers, credentials: 'include' });
+            if (r.ok) walkCourses(await r.json(), 0);
+          } catch (e) {}
+        }
+
+        let history = [];
+        for (const path of [
+          '/CourseRegistration/registeredcourseshistory',
+          '/courseRegistration/registeredcourseshistory',
+        ]) {
+          try {
+            const r = await fetch(b + path, { headers: headers, credentials: 'include' });
+            if (!r.ok) continue;
+            history = asList(await r.json());
+            if (history.length) break;
+          } catch (e) {}
+        }
+
+        for (const row of history) {
+          if (!row || typeof row !== 'object') continue;
+          const sessionId = row.sessionId || row.SessionId || row.sessionID;
+          const semester = row.semester != null ? row.semester : row.Semester;
+          const yearOfStudyId = row.yearOfStudyId || row.YearOfStudyId || row.levelId || row.LevelId || '';
+          if (sessionId == null || semester == null) continue;
+          const qs = 'SessionId=' + encodeURIComponent(sessionId)
+            + '&Semester=' + encodeURIComponent(semester)
+            + '&YearOfStudyId=' + encodeURIComponent(yearOfStudyId);
+          for (const path of [
+            '/courseRegistration/registeredcourses?' + qs,
+            '/CourseRegistration/registeredcourses?' + qs,
+          ]) {
+            try {
+              const r = await fetch(b + path, { headers: headers, credentials: 'include' });
+              if (!r.ok) continue;
+              walkCourses(await r.json(), 0);
+              break;
+            } catch (e) {}
+          }
+        }
+      }
+      return out;
+    })()`) as Promise<LmsCourse[]>;
+  }
 
   /** Close chat widgets / modals that block clicks on SPA portals. */
   private async dismissBlockingOverlays(page: Page): Promise<void> {
