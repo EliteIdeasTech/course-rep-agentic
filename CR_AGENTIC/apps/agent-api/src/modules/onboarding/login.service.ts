@@ -1,10 +1,4 @@
-import {
-  BadRequestException,
-  Inject,
-  Injectable,
-  NotFoundException,
-  UnauthorizedException,
-} from '@nestjs/common';
+import { BadGatewayException, BadRequestException, Inject, Injectable, NotFoundException, UnauthorizedException } from '@nestjs/common';
 import { ConfigService } from '@nestjs/config';
 import { JwtService } from '@nestjs/jwt';
 import Redis from 'ioredis';
@@ -174,7 +168,9 @@ export class LoginService {
       `portal-${sessionId.slice(0, 8)}@students.courserep.local`;
     const displayName = profile?.displayName ?? undefined;
 
-    const upserted = await this.courseRep.upsertUserFromPortal({
+    let upserted;
+    try {
+      upserted = await this.courseRep.upsertUserFromPortal({
       email,
       displayName,
       universityId: session.universityId ?? undefined,
@@ -184,6 +180,10 @@ export class LoginService {
         profile?.academicLevelName ?? session.academicLevelName ?? undefined,
       studentId: profile?.studentId ?? undefined,
     });
+    } catch (err) {
+      const msg = err instanceof Error ? err.message : 'Course Rep identity upsert failed';
+      throw new BadGatewayException(msg);
+    }
 
     const realUserId = upserted.userId;
 

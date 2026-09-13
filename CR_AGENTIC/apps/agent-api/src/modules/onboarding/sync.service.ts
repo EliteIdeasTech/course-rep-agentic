@@ -1,4 +1,4 @@
-import { Injectable } from '@nestjs/common';
+import { BadGatewayException, Injectable } from '@nestjs/common';
 import { prisma } from '@cr-agentic/database';
 import { writeAuditLog } from '@cr-agentic/observability';
 import { CourseRepClient } from '../../integrations/course-rep/course-rep.client';
@@ -36,15 +36,21 @@ export class SyncService {
     const courseIdByTitle = new Map<string, string>();
 
     if (courses.length > 0) {
-      const result = await this.courseRep.importCourses({
-        userId,
-        courses: courses.map((c) => ({
-          code: c.code ?? c.externalId ?? c.title,
-          title: c.title,
-          units: c.units ?? undefined,
-          instructor: c.instructor ?? undefined,
-        })),
-      });
+      let result: { imported: number };
+      try {
+        result = await this.courseRep.importCourses({
+          userId,
+          courses: courses.map((c) => ({
+            code: c.code ?? c.externalId ?? c.title,
+            title: c.title,
+            units: c.units ?? undefined,
+            instructor: c.instructor ?? undefined,
+          })),
+        });
+      } catch (err) {
+        const msg = err instanceof Error ? err.message : 'Course import failed';
+        throw new BadGatewayException(msg);
+      }
       importedCourses = result.imported;
 
       // Best-effort: re-fetch offerings aren't available; map by title for event linking.

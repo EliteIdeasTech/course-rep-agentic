@@ -42,7 +42,18 @@ export class CourseRepClient {
       });
 
       if (!res.ok) {
-        throw new Error(`Request failed ${path}: ${res.status}`);
+        let body = '';
+        try {
+          body = (await res.text()).slice(0, 500);
+        } catch {
+          body = '';
+        }
+        const err = new Error(
+          `Course Rep API ${path} failed: ${res.status}${body ? ` — ${body}` : ''}`,
+        ) as Error & { status?: number; body?: string };
+        err.status = res.status;
+        err.body = body;
+        throw err;
       }
 
       if (res.status === 204) {
