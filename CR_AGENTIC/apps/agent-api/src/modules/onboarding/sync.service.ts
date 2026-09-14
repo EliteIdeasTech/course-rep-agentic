@@ -1,11 +1,17 @@
-import { BadGatewayException, Injectable } from '@nestjs/common';
+import { BadGatewayException, Injectable, Logger } from '@nestjs/common';
 import { prisma } from '@cr-agentic/database';
 import { writeAuditLog } from '@cr-agentic/observability';
 import { CourseRepClient } from '../../integrations/course-rep/course-rep.client';
 import { OnboardingService } from './onboarding.service';
 
+const EVENT_CONCURRENCY = 8;
+/** Leave headroom under Cloudflare's ~100s proxy limit. */
+const EVENT_BUDGET_MS = 70_000;
+
 @Injectable()
 export class SyncService {
+  private readonly logger = new Logger(SyncService.name);
+
   constructor(
     private readonly courseRep: CourseRepClient,
     private readonly onboarding: OnboardingService,
@@ -32,8 +38,6 @@ export class SyncService {
     });
 
     let importedCourses = 0;
-    const courseIdByExternal = new Map<string, string>();
-    const courseIdByTitle = new Map<string, string>();
 
     if (courses.length > 0) {
       let result: { imported: number };
@@ -53,92 +57,102 @@ export class SyncService {
       }
       importedCourses = result.imported;
 
-      // Best-effort: re-fetch offerings aren't available; map by title for event linking.
-      for (const c of courses) {
-        if (c.externalId) courseIdByExternal.set(c.externalId, c.id);
-        courseIdByTitle.set(c.title.toLowerCase(), c.id);
-      }
-
       await prisma.discoveredCourse.updateMany({
         where: { onboardingSessionId: sessionId, selected: true },
         data: { syncedAt: new Date() },
       });
     }
 
-    let syncedAssignments = 0;
+    type EventJob = { kind: 'assignment' | 'timetable' | 'calendar'; run: () => Promise<void> };
+    const jobs: EventJob[] = [];
+
     for (const assignment of assignments) {
-      await this.courseRep.createStudyPlanEvent({
-        userId,
-        type: this.mapAssignmentType(assignment.eventType),
-        title: assignment.title,
-        dueAt: assignment.dueAt ?? undefined,
-        startsAt: assignment.dueAt ?? undefined,
+      jobs.push({
+        kind: 'assignment',
+        run: async () => {
+          await this.courseRep.createStudyPlanEvent({
+            userId,
+            type: this.mapAssignmentType(assignment.eventType),
+            title: assignment.title,
+            dueAt: assignment.dueAt ?? undefined,
+            startsAt: assignment.dueAt ?? undefined,
+          });
+        },
       });
-      syncedAssignments += 1;
     }
+
+    for (const slot of timetableSlots) {
+      jobs.push({
+        kind: 'timetable',
+        run: async () => {
+          try {
+            await this.courseRep.createStudyPlanEvent({
+              userId,
+              type: 'class_session',
+              title: slot.title,
+              startsAt: slot.startsAt ?? undefined,
+              endsAt: slot.endsAt ?? undefined,
+              metadata: {
+                dayOfWeek: slot.dayOfWeek,
+                location: slot.location,
+                courseExternalId: slot.courseExternalId,
+                courseTitle: slot.courseTitle,
+                source: 'agent_timetable',
+              },
+            });
+          } catch {
+            await this.courseRep.createStudyPlanEvent({
+              userId,
+              type: 'outside_activity',
+              title: slot.title,
+              startsAt: slot.startsAt ?? undefined,
+              endsAt: slot.endsAt ?? undefined,
+              metadata: {
+                dayOfWeek: slot.dayOfWeek,
+                location: slot.location,
+                courseExternalId: slot.courseExternalId,
+                courseTitle: slot.courseTitle,
+                source: 'agent_timetable',
+                intendedType: 'class_session',
+              },
+            });
+          }
+        },
+      });
+    }
+
+    for (const event of calendarEvents) {
+      jobs.push({
+        kind: 'calendar',
+        run: async () => {
+          await this.courseRep.createStudyPlanEvent({
+            userId,
+            type: this.mapEventType(event.eventType),
+            title: event.title,
+            startsAt: event.startsAt ?? undefined,
+            endsAt: event.endsAt ?? undefined,
+            dueAt: event.startsAt ?? undefined,
+          });
+        },
+      });
+    }
+
+    const counts = await this.runJobsWithBudget(jobs, EVENT_CONCURRENCY, EVENT_BUDGET_MS);
+    const syncedAssignments = counts.assignment;
+    const syncedTimetable = counts.timetable;
+    const syncedEvents = counts.calendar;
+
     if (syncedAssignments > 0) {
       await prisma.discoveredAssignment.updateMany({
         where: { onboardingSessionId: sessionId, selected: true },
         data: { syncedAt: new Date() },
       });
     }
-
-    let syncedTimetable = 0;
-    for (const slot of timetableSlots) {
-      // Prefer class_session; fall back to outside_activity if the main DB
-      // enum has not been migrated yet.
-      try {
-        await this.courseRep.createStudyPlanEvent({
-          userId,
-          type: 'class_session',
-          title: slot.title,
-          startsAt: slot.startsAt ?? undefined,
-          endsAt: slot.endsAt ?? undefined,
-          metadata: {
-            dayOfWeek: slot.dayOfWeek,
-            location: slot.location,
-            courseExternalId: slot.courseExternalId,
-            courseTitle: slot.courseTitle,
-            source: 'agent_timetable',
-          },
-        });
-      } catch {
-        await this.courseRep.createStudyPlanEvent({
-          userId,
-          type: 'outside_activity',
-          title: slot.title,
-          startsAt: slot.startsAt ?? undefined,
-          endsAt: slot.endsAt ?? undefined,
-          metadata: {
-            dayOfWeek: slot.dayOfWeek,
-            location: slot.location,
-            courseExternalId: slot.courseExternalId,
-            courseTitle: slot.courseTitle,
-            source: 'agent_timetable',
-            intendedType: 'class_session',
-          },
-        });
-      }
-      syncedTimetable += 1;
-    }
     if (syncedTimetable > 0) {
       await prisma.discoveredTimetableSlot.updateMany({
         where: { onboardingSessionId: sessionId, selected: true },
         data: { syncedAt: new Date() },
       });
-    }
-
-    let syncedEvents = 0;
-    for (const event of calendarEvents) {
-      await this.courseRep.createStudyPlanEvent({
-        userId,
-        type: this.mapEventType(event.eventType),
-        title: event.title,
-        startsAt: event.startsAt ?? undefined,
-        endsAt: event.endsAt ?? undefined,
-        dueAt: event.startsAt ?? undefined,
-      });
-      syncedEvents += 1;
     }
     if (syncedEvents > 0) {
       await prisma.discoveredCalendarEvent.updateMany({
@@ -180,6 +194,8 @@ export class SyncService {
         syncedAssignments,
         syncedTimetable,
         syncedEvents,
+        eventJobsTotal: jobs.length,
+        eventJobsSkipped: Math.max(0, jobs.length - (syncedAssignments + syncedTimetable + syncedEvents)),
       },
     });
 
@@ -191,6 +207,48 @@ export class SyncService {
       // Back-compat for existing web clients.
       syncedEventsTotal: syncedAssignments + syncedTimetable + syncedEvents,
     };
+  }
+
+  private async runJobsWithBudget(
+    jobs: Array<{ kind: 'assignment' | 'timetable' | 'calendar'; run: () => Promise<void> }>,
+    concurrency: number,
+    budgetMs: number,
+  ): Promise<Record<'assignment' | 'timetable' | 'calendar', number>> {
+    const counts = { assignment: 0, timetable: 0, calendar: 0 };
+    if (jobs.length === 0) return counts;
+
+    const started = Date.now();
+    let next = 0;
+    let stoppedEarly = false;
+
+    const worker = async () => {
+      while (true) {
+        if (Date.now() - started > budgetMs) {
+          stoppedEarly = true;
+          return;
+        }
+        const i = next++;
+        if (i >= jobs.length) return;
+        const job = jobs[i];
+        try {
+          await job.run();
+          counts[job.kind] += 1;
+        } catch (err) {
+          this.logger.warn(
+            `sync event failed (${job.kind}): ${err instanceof Error ? err.message : String(err)}`,
+          );
+        }
+      }
+    };
+
+    const n = Math.min(concurrency, jobs.length);
+    await Promise.all(Array.from({ length: n }, () => worker()));
+    if (stoppedEarly) {
+      this.logger.warn(
+        `sync event budget ${budgetMs}ms exhausted; completed ${counts.assignment + counts.timetable + counts.calendar}/${jobs.length}`,
+      );
+    }
+    return counts;
   }
 
   private mapAssignmentType(eventType: string | null): string {
