@@ -165,7 +165,7 @@ to retry — re-run `login/start`).
 
 ```json
 {
-  "courses": [{ "id": "uuid", "code": "CSC301", "title": "Algorithms", "units": 3, "selected": true }],
+  "courses": [{ "id": "uuid", "code": "CSC301", "title": "Algorithms", "units": 3, "selected": true, "offered": true }],
   "academicRecords": [{ "id": "uuid", "cumulativeGpa": 4.32, "gradingScale": {}, "courseGrades": [] }],
   "calendarEvents": [{ "id": "uuid", "title": "Exam week", "eventType": "exam", "startsAt": "2026-07-01T00:00:00Z" }]
 }
@@ -176,16 +176,37 @@ to retry — re-run `login/start`).
 - `POST /onboarding/:sessionId/apply-results`:
 
 ```json
-{ "courseIds": ["uuid"], "calendarEventIds": ["uuid"] }
+{
+  "courseIds": ["<every discovered course id, in discovery order>"],
+  "offeredCourseIds": ["<checked course ids>"],
+  "offeredCodes": ["CSC301"],
+  "assignmentIds": ["<checked assignment ids>"],
+  "timetableSlotIds": ["<checked timetable ids>"],
+  "calendarEventIds": ["<checked calendar event ids>"]
+}
 ```
 
-Response: `{ "stage": "ONBOARDING_COMPLETE" }`. Omitting an array leaves that
-section's current selections untouched.
+`courseIds` is the full discovered set and is stored in `discovered_courses`.
+`offeredCourseIds` marks which of those rows are offered. `offeredCodes` is the
+de-duplicated, non-empty codes of that subset (case-insensitive match). A
+checked course with no code is still offered by id. Omitting `offeredCourseIds`
+and `offeredCodes` keeps the older meaning of `courseIds`: those ids are the
+offered subset, and the other scraped courses stay stored unoffered.
 
-- `POST /onboarding/:sessionId/sync-to-course-rep` (optional) →
-  `{ "importedCourses": 5, "syncedEvents": 3 }`. Pushes the selected courses and
-  calendar events into the main Course Rep app and records the confirmed portal
-  on the `University` record.
+Assignment, timetable, and calendar id lists are still the checked subset only.
+
+Response: `{ "stage": "ONBOARDING_COMPLETE", "courses": [ ...full discovery list ], "discoveredCourseCount": 12, "offeredCourseCount": 4 }`.
+Each course includes `selected` and `offered` (the same flag).
+
+- `POST /onboarding/:sessionId/sync-to-course-rep` accepts the same
+  `courseIds`, `offeredCourseIds`, and `offeredCodes` body and persists that
+  selection before import. Response:
+  `{ "importedCourses": 12, "discoveredCourses": 12, "offeredCourses": 4, "unofferedCourses": 8, "syncedEvents": 3 }`.
+  The import posts every scraped course to `POST /internal/courses/import-from-agent`
+  with `offered` set from the subset above. That main-API field is not accepted
+  until `course-rep-backend` adds `offered` to `AgentCourseDto`. Repeating sync
+  updates those records. Selected calendar events are still pushed as study-plan
+  events, and the confirmed portal is recorded on the `University` record.
 
 ### Session status (any time)
 

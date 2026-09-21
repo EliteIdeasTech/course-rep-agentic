@@ -86,7 +86,7 @@ flowchart LR
 
 **Data flow after sync:**
 
-- Selected courses → `POST /internal/courses/import-from-agent` (agent → main, server-side).
+- Every scraped course → `POST /internal/courses/import-from-agent` (agent → main, server-side). Selected courses are `offered: true`; the rest are upserted unoffered.
 - Calendar events → `POST /internal/study-plan/events`.
 - Confirmed portal URL + LMS type → `POST /internal/universities/portal` (updates `University.studentPortalUrl`, `University.lmsType`).
 
@@ -340,7 +340,8 @@ interface DiscoveredCourse {
   title: string;
   units: number | null;
   instructor: string | null;
-  selected: boolean; // default true from worker
+  selected: boolean; // default true from worker; this is the offered flag
+  offered: boolean; // same value as selected, explicit for the sync contract
 }
 
 interface DiscoveredCalendarEvent {
@@ -365,12 +366,27 @@ POST /onboarding/:sessionId/apply-results
 
 ```json
 {
-  "courseIds": ["uuid", "uuid"],
+  "courseIds": ["uuid-of-every-discovered-course"],
+  "offeredCourseIds": ["uuid-of-checked-course"],
+  "offeredCodes": ["CSC301"],
   "calendarEventIds": ["uuid"]
 }
 ```
 
-Omitting an array leaves that section’s selections unchanged. Response: `{ "stage": "ONBOARDING_COMPLETE" }`.
+`courseIds` is the full discovery list, in discovery order. `offeredCourseIds` and `offeredCodes` are the checked subset (`offeredCodes` may omit a checked course that has no code). The agent keeps every `courseIds` row in `discovered_courses` and sets `selected` / `offered` only for that subset. Assignments, timetable slots, and calendar events still use their own id lists as the selected subset.
+
+Older clients that send only `courseIds` still work: those ids are the offered subset, and the other scraped courses stay stored unoffered. Omitting an array leaves that section’s selections unchanged.
+
+Response includes the full discovery list so the client still has every scraped course when it calls sync:
+
+```json
+{
+  "stage": "ONBOARDING_COMPLETE",
+  "courses": [{ "id": "uuid", "code": "CSC301", "title": "Algorithms", "selected": true, "offered": true }],
+  "discoveredCourseCount": 12,
+  "offeredCourseCount": 4
+}
+```
 
 **Sync to main app** (recommended, can be automatic after apply):
 
@@ -378,9 +394,20 @@ Omitting an array leaves that section’s selections unchanged. Response: `{ "st
 POST /onboarding/:sessionId/sync-to-course-rep
 ```
 
-Response: `{ "importedCourses": 5, "syncedEvents": 3 }`
+The same three course fields may be repeated on this body. The agent persists them, then sends **all** scraped courses to `POST /internal/courses/import-from-agent`. Each row has `offered` matching the checked subset. The main API must accept `offered` on `AgentCourseDto` (the live API still rejects unknown fields). It upserts departmental courses and offer/unoffers the student. A later sync sends the same course codes again and updates those records. Assignments, timetable slots, and calendar events are still only the selected ones (they become study-plan events).
 
-This pushes selected data into Course Rep and updates the university’s cached portal fields.
+```json
+{
+  "importedCourses": 12,
+  "discoveredCourses": 12,
+  "offeredCourses": 4,
+  "unofferedCourses": 8,
+  "syncedEvents": 3,
+  "syncedEventsTotal": 3
+}
+```
+
+`importedCourses` is the catalog upsert count (every scraped course), not the offered subset. This also updates the university’s cached portal fields.
 
 ### Cancel anytime
 
@@ -854,7 +881,7 @@ Poll `GET /api/v1/agent/tasks/:id` for progress (optional dashboard UI).
 | Bridge token expired | 401 on `login-bridge` | Re-call `login/start` |
 | Login validation failed | `login/status → failed` or `REAUTH_REQUIRED` | Explain + restart login |
 | Session expired | `expiresAt` in past | Start new onboarding |
-| Sync partial failure | `sync-to-course-rep` counts < selected | Show what imported; offer retry sync |
+| Sync partial failure | `importedCourses` < `discoveredCourses`, or `syncedEventsTotal` < selected events | Show what imported; offer retry sync |
 | Network errors | fetch throws | Retry with backoff; keep stage in URL |
 
 Always surface `lastError` from status when present — it is structured JSON from the worker.
