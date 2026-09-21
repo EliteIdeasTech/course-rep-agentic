@@ -10,11 +10,28 @@ import { Readable } from 'stream';
 export class S3StorageClient {
   private readonly client: S3Client;
   private readonly bucket: string;
+  private readonly customEndpoint: boolean;
 
-  constructor(private readonly env: Pick<AgentEnv, 'AWS_REGION' | 'AWS_S3_BUCKET' | 'AWS_ACCESS_KEY_ID' | 'AWS_SECRET_ACCESS_KEY'>) {
+  constructor(
+    private readonly env: Pick<
+      AgentEnv,
+      | 'AWS_REGION'
+      | 'AWS_S3_BUCKET'
+      | 'AWS_ACCESS_KEY_ID'
+      | 'AWS_SECRET_ACCESS_KEY'
+      | 'AWS_ENDPOINT_URL'
+    >,
+  ) {
     this.bucket = env.AWS_S3_BUCKET;
+    this.customEndpoint = Boolean(env.AWS_ENDPOINT_URL);
     this.client = new S3Client({
       region: env.AWS_REGION,
+      ...(this.customEndpoint
+        ? {
+            endpoint: env.AWS_ENDPOINT_URL,
+            forcePathStyle: true,
+          }
+        : {}),
       credentials:
         env.AWS_ACCESS_KEY_ID && env.AWS_SECRET_ACCESS_KEY
           ? {
@@ -36,7 +53,7 @@ export class S3StorageClient {
         Key: key,
         Body: body,
         ContentType: contentType,
-        ServerSideEncryption: 'AES256',
+        ...(this.customEndpoint ? {} : { ServerSideEncryption: 'AES256' as const }),
       }),
     );
     return key;

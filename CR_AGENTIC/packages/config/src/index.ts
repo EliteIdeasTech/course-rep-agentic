@@ -14,6 +14,9 @@ export const agentEnvSchema = z.object({
   AWS_S3_BUCKET: z.string().min(1),
   AWS_ACCESS_KEY_ID: z.string().optional(),
   AWS_SECRET_ACCESS_KEY: z.string().optional(),
+  // Optional S3-compatible endpoint (e.g. self-hosted MinIO).
+  // Leave unset to use real AWS S3.
+  AWS_ENDPOINT_URL: z.string().url().optional(),
   SESSION_ENCRYPTION_KEY: z.string().min(32),
   OPENAI_API_KEY: z.string().optional(),
   OPENAI_MODEL: z.string().default('gpt-4o'),
