@@ -1,4 +1,6 @@
-# CR_AGENTIC continuous deploy via SSM on EC2.
+# Suspended: AWS SSM/OIDC deploy is no longer the production path.
+# Production deploys use Contabo SSH (.github/workflows/deploy.yml).
+# This workflow is workflow_dispatch-only so it cannot run on push to cr-agentic.
 #
 # Secrets (optional but recommended — match api.courserep.ng):
 #   CR_AGENT_JWT_SECRET
@@ -6,11 +8,9 @@
 #   CR_AGENT_JWT_AUDIENCE
 #   CR_AGENT_CORS_ORIGIN
 
-name: Deploy CR_AGENTIC
+name: Deploy CR_AGENTIC (AWS SSM, suspended)
 
 on:
-  push:
-    branches: [cr-agentic]
   workflow_dispatch: {}
 
 permissions:

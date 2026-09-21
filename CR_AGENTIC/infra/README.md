@@ -45,13 +45,16 @@ aws secretsmanager put-secret-value --secret-id cr-agentic/jwt_secret --secret-s
 
 ## Deploys & migrations
 
-CI (`.github/workflows/deploy.yml`) builds and pushes one image per service to
-ECR, runs `prisma migrate deploy` as a one-off ECS task (`cr-agentic-migrate`),
-and then forces a new deployment on each service. Containers do **not**
-auto-migrate on boot — the migration step gates the rollout.
+Production CI (`.github/workflows/deploy.yml`) SSHes to the Contabo VPS, resets
+`/opt/courserep/courserep_backend` to `origin/cr-agentic`, and runs
+`CR_AGENTIC/docker/deploy.sh` (compose build + migrate + up). Health is checked
+at `http://127.0.0.1:3100/api/v1/agent/health` (fallback `/health`).
 
 Required GitHub repository secrets:
 
-- `AWS_DEPLOY_ROLE_ARN` — OIDC role assumed by the workflow
-- `ECS_APP_SUBNETS` — comma-separated private app subnet IDs
-- `ECS_SECURITY_GROUP` — ECS security group ID
+- `CONTABO_HOST` — VPS address (84.46.240.202)
+- `CONTABO_USER` — SSH user
+- `CONTABO_SSH_KEY` — private key for that user
+
+The Terraform in this directory still describes the suspended AWS ECS/ECR
+stack. Do not use it for production rollouts.
