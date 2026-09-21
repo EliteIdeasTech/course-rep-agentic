@@ -1,6 +1,6 @@
 # CR_AGENTIC production deploy to Contabo VPS via SSH.
-# GitHub only executes workflows from the repository-root .github/workflows/
-# directory; keep this file in sync with .github/workflows/deploy.yml.
+# This is the GitHub-executable copy (repo-root .github/workflows).
+# Keep in sync with CR_AGENTIC/.github/workflows/deploy.yml.
 #
 # Required GitHub secrets:
 #   CONTABO_HOST     — VPS address (84.46.240.202)
