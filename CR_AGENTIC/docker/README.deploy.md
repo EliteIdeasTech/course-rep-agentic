@@ -95,8 +95,9 @@ The `migrate` container should show state `Exited (0)`. App services should be
 
 ## 7. External access & HTTPS (recommended)
 
-The API listens on `:3100`. For a public HTTPS endpoint, put a reverse proxy
-in front (Caddy gives automatic TLS):
+The API is published on `127.0.0.1:3100` only (not `0.0.0.0`). For a public
+HTTPS endpoint, put a reverse proxy in front (Caddy on the host terminates
+TLS for `agent-api.courserep.ng`):
 
 ```bash
 # /etc/caddy/Caddyfile
