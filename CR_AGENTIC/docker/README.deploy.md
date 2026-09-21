@@ -139,7 +139,10 @@ JWT_AUDIENCE=mMY_AUDIOENCE_HERE
 
 ## 8. Connect the main Course Rep app
 
-- Set `COURSE_REP_API_URL` in `.env` to the parent API's reachable URL.
+- Set `COURSE_REP_API_URL` in `.env` to the parent API's reachable URL **including
+  the Nest global `/api` prefix**, e.g. `https://api.courserep.ng/api`.
+  Omitting `/api` used to 404 (`Cannot POST /internal/courses/import-from-agent`);
+  the agent client now appends `/api` if it is missing.
 - Set the **same** `INTERNAL_API_SECRET` on both the main app and CR_AGENTIC so
   the internal endpoints (`/internal/courses/import-from-agent`,
   `/internal/universities/portal`) authenticate.

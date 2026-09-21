@@ -37,7 +37,7 @@ services:
       AGENT_DATABASE_URL: postgresql://agent:agent@agent-postgres:5432/cr_agent?schema=public
       REDIS_HOST: agent-redis
       REDIS_PORT: 6379
-      COURSE_REP_API_URL: http://host.docker.internal:3000
+      COURSE_REP_API_URL: http://host.docker.internal:3000/api
     ports:
       - "3100:3100"
     depends_on:
@@ -79,7 +79,7 @@ services:
       AGENT_DATABASE_URL: postgresql://agent:agent@agent-postgres:5432/cr_agent?schema=public
       REDIS_HOST: agent-redis
       REDIS_PORT: 6379
-      COURSE_REP_API_URL: http://host.docker.internal:3000
+      COURSE_REP_API_URL: http://host.docker.internal:3000/api
     depends_on:
       agent-postgres:
         condition: service_healthy
@@ -99,7 +99,7 @@ services:
       AGENT_DATABASE_URL: postgresql://agent:agent@agent-postgres:5432/cr_agent?schema=public
       REDIS_HOST: agent-redis
       REDIS_PORT: 6379
-      COURSE_REP_API_URL: http://host.docker.internal:3000
+      COURSE_REP_API_URL: http://host.docker.internal:3000/api
     depends_on:
       agent-postgres:
         condition: service_healthy

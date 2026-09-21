@@ -1,5 +1,8 @@
 import { Injectable } from '@nestjs/common';
 import { ConfigService } from '@nestjs/config';
+import { normalizeCourseRepApiUrl } from '@cr-agentic/config';
+
+export { normalizeCourseRepApiUrl };
 
 export interface CourseRepUser {
   id: string;
@@ -15,7 +18,9 @@ export class CourseRepClient {
   private readonly timeoutMs: number;
 
   constructor(private readonly config: ConfigService) {
-    this.baseUrl = config.get<string>('COURSE_REP_API_URL', 'http://localhost:3000');
+    this.baseUrl = normalizeCourseRepApiUrl(
+      config.get<string>('COURSE_REP_API_URL', 'http://localhost:3000'),
+    );
     this.secret = config.get<string>('INTERNAL_API_SECRET', '');
     this.timeoutMs = Number(config.get<string>('COURSE_REP_HTTP_TIMEOUT_MS', '12000'));
   }

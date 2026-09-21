@@ -1,6 +1,10 @@
+import { normalizeCourseRepApiUrl } from '@cr-agentic/config';
+
 export class CourseRepClient {
   constructor(
-    private readonly baseUrl = process.env.COURSE_REP_API_URL ?? 'http://localhost:3000',
+    private readonly baseUrl = normalizeCourseRepApiUrl(
+      process.env.COURSE_REP_API_URL ?? 'http://localhost:3000',
+    ),
     private readonly secret = process.env.INTERNAL_API_SECRET ?? '',
   ) {}
 

@@ -119,7 +119,7 @@ variable "image_tag" {
 
 variable "course_rep_api_url" {
   type        = string
-  description = "Base URL of the main Course Rep API for internal integration."
+  description = "Base URL of the main Course Rep API, including the Nest global /api prefix (e.g. https://api.courserep.ng/api)."
 }
 
 variable "certificate_arn" {
