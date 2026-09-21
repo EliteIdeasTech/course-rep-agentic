@@ -165,6 +165,7 @@ export class OnboardingController {
   }
 
   /** After portal session + profile scrape: create/link Course Rep user and issue JWT. */
+  @ApiHeader({ name: 'x-onboarding-guest-token', required: false })
   @Post(':sessionId/claim-identity')
   async claimIdentity(
     @CurrentUser('id') userId: string | undefined,
@@ -202,6 +203,7 @@ export class OnboardingController {
     return this.deepDiscovery.results(actor, sessionId);
   }
 
+  @ApiHeader({ name: 'x-onboarding-guest-token', required: false })
   @Post(':sessionId/apply-results')
   async applyResults(
     @CurrentUser('id') userId: string | undefined,
@@ -213,6 +215,7 @@ export class OnboardingController {
     return this.deepDiscovery.applyResults(actor, sessionId, dto);
   }
 
+  @ApiHeader({ name: 'x-onboarding-guest-token', required: false })
   @Post(':sessionId/sync-to-course-rep')
   async syncToCourseRep(
     @CurrentUser('id') userId: string | undefined,
