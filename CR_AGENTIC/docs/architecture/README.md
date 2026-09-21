@@ -15,7 +15,7 @@ Endpoints:
 
 - `GET /internal/users/:id`
 - `POST /internal/materials/import-from-agent`
-- `POST /internal/courses/import-from-agent`
+- `POST /internal/courses/import-from-agent` — upserts the full scraped catalog. Each course includes `offered`; only that subset becomes a student offering. Re-sync updates the same departmental course (`code` + department) in place. The live main API still rejects `offered` (`forbidNonWhitelisted`) until the matching backend change ships.
 - `POST /internal/universities/portal`
 - `POST /internal/study-plan/events`
 - `POST /internal/study-plan/recompute`

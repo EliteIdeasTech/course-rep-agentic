@@ -165,7 +165,7 @@ to retry — re-run `login/start`).
 
 ```json
 {
-  "courses": [{ "id": "uuid", "code": "CSC301", "title": "Algorithms", "units": 3, "selected": true }],
+  "courses": [{ "id": "uuid", "code": "CSC301", "title": "Algorithms", "units": 3, "selected": true, "offered": true }],
   "academicRecords": [{ "id": "uuid", "cumulativeGpa": 4.32, "gradingScale": {}, "courseGrades": [] }],
   "calendarEvents": [{ "id": "uuid", "title": "Exam week", "eventType": "exam", "startsAt": "2026-07-01T00:00:00Z" }]
 }
@@ -179,13 +179,19 @@ to retry — re-run `login/start`).
 { "courseIds": ["uuid"], "calendarEventIds": ["uuid"] }
 ```
 
-Response: `{ "stage": "ONBOARDING_COMPLETE" }`. Omitting an array leaves that
-section's current selections untouched.
+`courseIds` are the courses to offer. Omitting an array leaves that section's
+current selections untouched. Unselected scraped courses remain on the session.
+
+Response: `{ "stage": "ONBOARDING_COMPLETE", "courses": [ ...full discovery list ], "discoveredCourseCount": 12, "offeredCourseCount": 4 }`.
+Each course includes `selected` and `offered` (the same flag). Keep this list;
+sync reads it server-side and does not want a client-filtered subset.
 
 - `POST /onboarding/:sessionId/sync-to-course-rep` (optional) →
-  `{ "importedCourses": 5, "syncedEvents": 3 }`. Pushes the selected courses and
-  calendar events into the main Course Rep app and records the confirmed portal
-  on the `University` record.
+  `{ "importedCourses": 12, "discoveredCourses": 12, "offeredCourses": 4, "unofferedCourses": 8, "syncedEvents": 3 }`.
+  Upserts every scraped course into the main Course Rep catalog. `offered: true`
+  rows become student offerings; the rest are stored unoffered. Repeating sync
+  updates those records. Selected calendar events are still pushed as study-plan
+  events, and the confirmed portal is recorded on the `University` record.
 
 ### Session status (any time)
 

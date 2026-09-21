@@ -2,6 +2,7 @@ import { BadGatewayException, Injectable, Logger } from '@nestjs/common';
 import { prisma } from '@cr-agentic/database';
 import { writeAuditLog } from '@cr-agentic/observability';
 import { CourseRepClient } from '../../integrations/course-rep/course-rep.client';
+import { toAgentImportCourses } from '../../integrations/course-rep/import-courses.payload';
 import { OnboardingService } from './onboarding.service';
 
 const EVENT_CONCURRENCY = 8;
@@ -18,14 +19,19 @@ export class SyncService {
   ) {}
 
   /**
-   * Pushes the user's selected discovered courses, assignments, timetable slots,
-   * and calendar events to the main Course Rep API.
+   * Upserts every scraped course into the main Course Rep catalog.
+   * `selected` is the offered flag: chosen courses are offered, the rest are
+   * sent unoffered. Assignments, timetable slots, and calendar events stay
+   * limited to the student's selection because those become study-plan events.
+   * A later sync sends the same course codes again so existing catalog rows
+   * and offerings are updated in place.
    */
   async syncToCourseRep(userId: string, sessionId: string) {
     const session = await this.onboarding.requireSession(userId, sessionId);
 
     const courses = await prisma.discoveredCourse.findMany({
-      where: { onboardingSessionId: sessionId, selected: true },
+      where: { onboardingSessionId: sessionId },
+      orderBy: [{ createdAt: 'asc' }, { id: 'asc' }],
     });
     const assignments = await prisma.discoveredAssignment.findMany({
       where: { onboardingSessionId: sessionId, selected: true },
@@ -37,19 +43,17 @@ export class SyncService {
       where: { onboardingSessionId: sessionId, selected: true },
     });
 
+    const importCourses = toAgentImportCourses(courses);
+    const offeredCourses = importCourses.filter((course) => course.offered).length;
+    const unofferedCourses = importCourses.length - offeredCourses;
     let importedCourses = 0;
 
-    if (courses.length > 0) {
+    if (importCourses.length > 0) {
       let result: { imported: number };
       try {
         result = await this.courseRep.importCourses({
           userId,
-          courses: courses.map((c) => ({
-            code: c.code ?? c.externalId ?? c.title,
-            title: c.title,
-            units: c.units ?? undefined,
-            instructor: c.instructor ?? undefined,
-          })),
+          courses: importCourses,
         });
       } catch (err) {
         const msg = err instanceof Error ? err.message : 'Course import failed';
@@ -58,7 +62,7 @@ export class SyncService {
       importedCourses = result.imported;
 
       await prisma.discoveredCourse.updateMany({
-        where: { onboardingSessionId: sessionId, selected: true },
+        where: { onboardingSessionId: sessionId },
         data: { syncedAt: new Date() },
       });
     }
@@ -191,6 +195,9 @@ export class SyncService {
       resourceId: sessionId,
       metadata: {
         importedCourses,
+        discoveredCourses: importCourses.length,
+        offeredCourses,
+        unofferedCourses,
         syncedAssignments,
         syncedTimetable,
         syncedEvents,
@@ -201,6 +208,9 @@ export class SyncService {
 
     return {
       importedCourses,
+      discoveredCourses: importCourses.length,
+      offeredCourses,
+      unofferedCourses,
       syncedAssignments,
       syncedTimetable,
       syncedEvents,

@@ -101,7 +101,11 @@ export class CredentialLoginRequestDto {
 }
 
 export class ApplyResultsRequestDto {
-  @ApiPropertyOptional({ type: [String], description: 'DiscoveredCourse ids to import' })
+  @ApiPropertyOptional({
+    type: [String],
+    description:
+      'DiscoveredCourse ids the student chose to offer. Other scraped courses stay on the session and sync as unoffered.',
+  })
   @IsOptional()
   @IsArray()
   @IsUUID('all', { each: true })

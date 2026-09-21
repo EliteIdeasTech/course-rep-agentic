@@ -11,6 +11,7 @@ import type { DiscoveryDeepScrapeJob } from '@cr-agentic/shared';
 import { writeAuditLog } from '@cr-agentic/observability';
 import { REDIS_CLIENT } from '../queue/queue.module';
 import { OnboardingService } from './onboarding.service';
+import { annotateOffered } from '../../integrations/course-rep/import-courses.payload';
 import { ApplyResultsRequestDto } from './dto/onboarding.request.dto';
 
 @Injectable()
@@ -115,7 +116,9 @@ export class DeepDiscoveryService {
       ]);
 
     return {
-      courses,
+      // Full scrape. `selected` / `offered` mark the subset the student offers.
+      // Unselected rows stay here so sync can upsert them as unoffered.
+      courses: courses.map((course) => annotateOffered(course)),
       assignments,
       timetableSlots,
       academicRecords,
@@ -131,7 +134,11 @@ export class DeepDiscoveryService {
     };
   }
 
-  /** Records the user's import selections and completes onboarding. */
+  /**
+   * Records which scraped courses the student wants to offer.
+   * Unselected courses stay on the session (`selected: false`) so sync can
+   * upsert the full catalog and leave those rows unoffered.
+   */
   async applyResults(userId: string, sessionId: string, dto: ApplyResultsRequestDto) {
     const session = await this.onboarding.requireSession(userId, sessionId);
 
@@ -188,6 +195,14 @@ export class DeepDiscoveryService {
       data: { discoveryStatus: 'COMPLETE' },
     });
 
+    const courses = (
+      await prisma.discoveredCourse.findMany({
+        where: { onboardingSessionId: sessionId },
+        orderBy: [{ code: 'asc' }, { title: 'asc' }],
+      })
+    ).map((course) => annotateOffered(course));
+    const offeredCourseCount = courses.filter((course) => course.offered).length;
+
     await writeAuditLog({
       actorId: userId,
       action: 'onboarding_results_applied',
@@ -195,12 +210,19 @@ export class DeepDiscoveryService {
       resourceId: sessionId,
       metadata: {
         courses: dto.courseIds?.length ?? 0,
+        discoveredCourses: courses.length,
+        offeredCourses: offeredCourseCount,
         assignments: dto.assignmentIds?.length ?? 0,
         timetableSlots: dto.timetableSlotIds?.length ?? 0,
         calendarEvents: dto.calendarEventIds?.length ?? 0,
       },
     });
 
-    return { stage: 'ONBOARDING_COMPLETE' };
+    return {
+      stage: 'ONBOARDING_COMPLETE' as const,
+      courses,
+      discoveredCourseCount: courses.length,
+      offeredCourseCount,
+    };
   }
 }
