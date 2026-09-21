@@ -100,17 +100,43 @@ export class CredentialLoginRequestDto {
   password!: string;
 }
 
-export class ApplyResultsRequestDto {
+/**
+ * Course fields shared by apply-results and sync-to-course-rep.
+ * `offeredCourseIds` and `offeredCodes` must be declared or ValidationPipe
+ * rejects them (`forbidNonWhitelisted`).
+ */
+export class CourseImportSelectionDto {
   @ApiPropertyOptional({
     type: [String],
     description:
-      'DiscoveredCourse ids the student chose to offer. Other scraped courses stay on the session and sync as unoffered.',
+      'Discovered course ids. When offeredCourseIds or offeredCodes is sent, this is the full discovery list in discovery order and every id is kept. When those fields are omitted, this is the offered subset (older clients).',
   })
   @IsOptional()
   @IsArray()
   @IsUUID('all', { each: true })
   courseIds?: string[];
 
+  @ApiPropertyOptional({
+    type: [String],
+    description: 'Discovered course ids the student chose to offer.',
+  })
+  @IsOptional()
+  @IsArray()
+  @IsUUID('all', { each: true })
+  offeredCourseIds?: string[];
+
+  @ApiPropertyOptional({
+    type: [String],
+    description:
+      'Non-empty course codes for the offered subset, in discovery order. Matched case-insensitively. A checked course with no code is still offered via offeredCourseIds.',
+  })
+  @IsOptional()
+  @IsArray()
+  @IsString({ each: true })
+  offeredCodes?: string[];
+}
+
+export class ApplyResultsRequestDto extends CourseImportSelectionDto {
   @ApiPropertyOptional({ type: [String], description: 'DiscoveredAssignment ids to import' })
   @IsOptional()
   @IsArray()

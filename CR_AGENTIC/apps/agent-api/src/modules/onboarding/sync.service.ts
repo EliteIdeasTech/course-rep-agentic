@@ -1,8 +1,11 @@
 import { BadGatewayException, Injectable, Logger } from '@nestjs/common';
 import { prisma } from '@cr-agentic/database';
 import { writeAuditLog } from '@cr-agentic/observability';
+import { orderDiscoveredCourses } from '../../integrations/course-rep/course-offering.selection';
 import { CourseRepClient } from '../../integrations/course-rep/course-rep.client';
 import { toAgentImportCourses } from '../../integrations/course-rep/import-courses.payload';
+import { CourseImportSelectionDto } from './dto/onboarding.request.dto';
+import { DeepDiscoveryService } from './deep-discovery.service';
 import { OnboardingService } from './onboarding.service';
 
 const EVENT_CONCURRENCY = 8;
@@ -16,6 +19,7 @@ export class SyncService {
   constructor(
     private readonly courseRep: CourseRepClient,
     private readonly onboarding: OnboardingService,
+    private readonly deepDiscovery: DeepDiscoveryService,
   ) {}
 
   /**
@@ -26,13 +30,19 @@ export class SyncService {
    * A later sync sends the same course codes again so existing catalog rows
    * and offerings are updated in place.
    */
-  async syncToCourseRep(userId: string, sessionId: string) {
+  async syncToCourseRep(
+    userId: string,
+    sessionId: string,
+    selection: CourseImportSelectionDto = {},
+  ) {
     const session = await this.onboarding.requireSession(userId, sessionId);
+    await this.deepDiscovery.persistCourseOffering(userId, sessionId, selection);
 
-    const courses = await prisma.discoveredCourse.findMany({
+    const storedCourses = await prisma.discoveredCourse.findMany({
       where: { onboardingSessionId: sessionId },
       orderBy: [{ createdAt: 'asc' }, { id: 'asc' }],
     });
+    const courses = orderDiscoveredCourses(storedCourses, selection.courseIds);
     const assignments = await prisma.discoveredAssignment.findMany({
       where: { onboardingSessionId: sessionId, selected: true },
     });

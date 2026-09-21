@@ -366,12 +366,16 @@ POST /onboarding/:sessionId/apply-results
 
 ```json
 {
-  "courseIds": ["uuid", "uuid"],
+  "courseIds": ["uuid-of-every-discovered-course"],
+  "offeredCourseIds": ["uuid-of-checked-course"],
+  "offeredCodes": ["CSC301"],
   "calendarEventIds": ["uuid"]
 }
 ```
 
-`courseIds` are the courses the student wants to **offer**. Omitting an array leaves that section’s selections unchanged. Courses left out of `courseIds` stay on the session (`selected: false` / `offered: false`); they are not deleted.
+`courseIds` is the full discovery list, in discovery order. `offeredCourseIds` and `offeredCodes` are the checked subset (`offeredCodes` may omit a checked course that has no code). The agent keeps every `courseIds` row in `discovered_courses` and sets `selected` / `offered` only for that subset. Assignments, timetable slots, and calendar events still use their own id lists as the selected subset.
+
+Older clients that send only `courseIds` still work: those ids are the offered subset, and the other scraped courses stay stored unoffered. Omitting an array leaves that section’s selections unchanged.
 
 Response includes the full discovery list so the client still has every scraped course when it calls sync:
 
@@ -390,7 +394,7 @@ Response includes the full discovery list so the client still has every scraped 
 POST /onboarding/:sessionId/sync-to-course-rep
 ```
 
-The agent sends **all** scraped courses to `POST /internal/courses/import-from-agent`. Each row has `offered` matching the selection. The main API upserts departmental courses and offer/unoffers the student. A later sync sends the same course codes again and updates those records. Assignments, timetable slots, and calendar events are still only the selected ones (they become study-plan events).
+The same three course fields may be repeated on this body. The agent persists them, then sends **all** scraped courses to `POST /internal/courses/import-from-agent`. Each row has `offered` matching the checked subset. The main API must accept `offered` on `AgentCourseDto` (the live API still rejects unknown fields). It upserts departmental courses and offer/unoffers the student. A later sync sends the same course codes again and updates those records. Assignments, timetable slots, and calendar events are still only the selected ones (they become study-plan events).
 
 ```json
 {

@@ -7,7 +7,7 @@
     "start": "nest start",
     "start:dev": "nest start --watch",
     "start:prod": "node dist/main",
-    "test": "tsc --module commonjs --target ES2022 --moduleResolution node --esModuleInterop --strict --skipLibCheck --outDir /tmp/agent-api-payload-test src/integrations/course-rep/import-courses.payload.ts src/integrations/course-rep/import-courses.payload.test.ts && node --test /tmp/agent-api-payload-test/import-courses.payload.test.js"
+    "test": "tsc --module commonjs --target ES2022 --moduleResolution node --esModuleInterop --strict --skipLibCheck --outDir /tmp/agent-api-payload-test src/integrations/course-rep/import-courses.payload.ts src/integrations/course-rep/import-courses.payload.test.ts src/integrations/course-rep/course-offering.selection.ts src/integrations/course-rep/course-offering.selection.test.ts && node --test /tmp/agent-api-payload-test/*.test.js"
   },
   "dependencies": {
     "@cr-agentic/agent-core": "0.1.0",

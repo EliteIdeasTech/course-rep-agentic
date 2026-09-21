@@ -11,8 +11,15 @@ import type { DiscoveryDeepScrapeJob } from '@cr-agentic/shared';
 import { writeAuditLog } from '@cr-agentic/observability';
 import { REDIS_CLIENT } from '../queue/queue.module';
 import { OnboardingService } from './onboarding.service';
+import {
+  orderDiscoveredCourses,
+  planCourseOffering,
+} from '../../integrations/course-rep/course-offering.selection';
 import { annotateOffered } from '../../integrations/course-rep/import-courses.payload';
-import { ApplyResultsRequestDto } from './dto/onboarding.request.dto';
+import {
+  ApplyResultsRequestDto,
+  CourseImportSelectionDto,
+} from './dto/onboarding.request.dto';
 
 @Injectable()
 export class DeepDiscoveryService {
@@ -135,6 +142,50 @@ export class DeepDiscoveryService {
   }
 
   /**
+   * Stores the full discovered course list and marks `selected` only for the
+   * offered subset. Sync reads those flags when it upserts the catalog.
+   */
+  async persistCourseOffering(
+    userId: string,
+    sessionId: string,
+    selection: CourseImportSelectionDto,
+  ) {
+    const existing = await prisma.discoveredCourse.findMany({
+      where: { onboardingSessionId: sessionId },
+      select: { id: true, code: true },
+    });
+    const plan = planCourseOffering(existing, selection);
+    if (!plan.apply) return plan;
+
+    if (plan.missingIds.length > 0) {
+      const selectedById = new Map(plan.updates.map((row) => [row.id, row.selected]));
+      await prisma.discoveredCourse.createMany({
+        data: plan.missingIds.map((id) => ({
+          id,
+          onboardingSessionId: sessionId,
+          userId,
+          externalId: id,
+          title: 'Discovered course',
+          selected: selectedById.get(id) ?? false,
+        })),
+      });
+    }
+
+    await prisma.discoveredCourse.updateMany({
+      where: { onboardingSessionId: sessionId },
+      data: { selected: false },
+    });
+    const offeredIds = plan.updates.filter((row) => row.selected).map((row) => row.id);
+    if (offeredIds.length > 0) {
+      await prisma.discoveredCourse.updateMany({
+        where: { onboardingSessionId: sessionId, id: { in: offeredIds } },
+        data: { selected: true },
+      });
+    }
+    return plan;
+  }
+
+  /**
    * Records which scraped courses the student wants to offer.
    * Unselected courses stay on the session (`selected: false`) so sync can
    * upsert the full catalog and leave those rows unoffered.
@@ -142,16 +193,7 @@ export class DeepDiscoveryService {
   async applyResults(userId: string, sessionId: string, dto: ApplyResultsRequestDto) {
     const session = await this.onboarding.requireSession(userId, sessionId);
 
-    if (dto.courseIds) {
-      await prisma.discoveredCourse.updateMany({
-        where: { onboardingSessionId: sessionId },
-        data: { selected: false },
-      });
-      await prisma.discoveredCourse.updateMany({
-        where: { onboardingSessionId: sessionId, id: { in: dto.courseIds } },
-        data: { selected: true },
-      });
-    }
+    const coursePlan = await this.persistCourseOffering(userId, sessionId, dto);
 
     if (dto.assignmentIds) {
       await prisma.discoveredAssignment.updateMany({
@@ -195,11 +237,12 @@ export class DeepDiscoveryService {
       data: { discoveryStatus: 'COMPLETE' },
     });
 
-    const courses = (
+    const courses = orderDiscoveredCourses(
       await prisma.discoveredCourse.findMany({
         where: { onboardingSessionId: sessionId },
-        orderBy: [{ code: 'asc' }, { title: 'asc' }],
-      })
+        orderBy: [{ createdAt: 'asc' }, { id: 'asc' }],
+      }),
+      dto.courseIds,
     ).map((course) => annotateOffered(course));
     const offeredCourseCount = courses.filter((course) => course.offered).length;
 
@@ -210,6 +253,9 @@ export class DeepDiscoveryService {
       resourceId: sessionId,
       metadata: {
         courses: dto.courseIds?.length ?? 0,
+        offeredCourseIds: dto.offeredCourseIds?.length ?? 0,
+        offeredCodes: dto.offeredCodes?.length ?? 0,
+        courseSelectionApplied: coursePlan.apply,
         discoveredCourses: courses.length,
         offeredCourses: offeredCourseCount,
         assignments: dto.assignmentIds?.length ?? 0,
