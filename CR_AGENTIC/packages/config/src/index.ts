@@ -1,4 +1,7 @@
 import { z } from 'zod';
+import { normalizeCourseRepApiUrl } from './course-rep-api-url';
+
+export { normalizeCourseRepApiUrl } from './course-rep-api-url';
 
 export const agentEnvSchema = z.object({
   AGENT_API_PORT: z.coerce.number().default(3100),
@@ -8,7 +11,11 @@ export const agentEnvSchema = z.object({
   AGENT_DATABASE_URL: z.string().url().or(z.string().startsWith('postgresql://')),
   REDIS_HOST: z.string().default('localhost'),
   REDIS_PORT: z.coerce.number().default(6379),
-  COURSE_REP_API_URL: z.string().url().default('http://localhost:3000'),
+  COURSE_REP_API_URL: z
+    .string()
+    .url()
+    .default('http://localhost:3000')
+    .transform(normalizeCourseRepApiUrl),
   INTERNAL_API_SECRET: z.string().min(8),
   AWS_REGION: z.string().default('us-east-1'),
   AWS_S3_BUCKET: z.string().min(1),

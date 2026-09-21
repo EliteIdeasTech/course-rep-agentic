@@ -15,7 +15,8 @@
     "db:generate": "yarn workspace @cr-agentic/database prisma:generate",
     "db:migrate": "yarn workspace @cr-agentic/database prisma:migrate",
     "db:push": "yarn workspace @cr-agentic/database prisma:push",
-    "lint": "eslint \"{apps,packages}/**/*.ts\" --fix"
+    "lint": "eslint \"{apps,packages}/**/*.ts\" --fix",
+    "test": "yarn workspace @cr-agentic/config test"
   },
   "devDependencies": {
     "@types/node": "^22.10.0",
