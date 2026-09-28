@@ -1,0 +1,102 @@
+# Configure the LLM model tiers in the Contabo server's CR_AGENTIC/.env and
+# read discovery-worker agent logs, without shell access to the VPS.
+#
+#   configure: detects the key provider (OpenRouter keys start with sk-or-),
+#              backs up .env, sets OPENAI_MODEL / OPENAI_NAV_MODEL (and
+#              OPENAI_BASE_URL for OpenRouter), then recreates the workers.
+#   logs:      prints recent course-discovery lines from discovery-worker.
+#
+# Never prints OPENAI_API_KEY or any other secret.
+
+name: CR_AGENTIC LLM env
+
+on:
+  workflow_dispatch:
+    inputs:
+      mode:
+        description: "configure or logs"
+        required: true
+        default: logs
+        type: choice
+        options: [logs, configure]
+      since:
+        description: "Log window for logs mode (e.g. 2h, 30m)"
+        required: false
+        default: 2h
+
+concurrency:
+  group: cr-agentic-deploy
+  cancel-in-progress: false
+
+permissions:
+  contents: read
+
+jobs:
+  run:
+    runs-on: ubuntu-latest
+    steps:
+      - name: Run on Contabo via SSH
+        uses: appleboy/ssh-action@v1.2.2
+        env:
+          MODE: ${{ inputs.mode }}
+          SINCE: ${{ inputs.since }}
+        with:
+          host: ${{ secrets.CONTABO_HOST }}
+          username: ${{ secrets.CONTABO_USER }}
+          key: ${{ secrets.CONTABO_SSH_KEY }}
+          envs: MODE,SINCE
+          script_stop: true
+          command_timeout: 15m
+          script: |
+            set -euo pipefail
+            cd /opt/courserep/courserep_backend/CR_AGENTIC
+            ENV_FILE=.env
+            if docker compose version >/dev/null 2>&1; then DC="docker compose"; else DC="docker-compose"; fi
+            COMPOSE="$DC --env-file ../.env -f docker-compose.prod.yml"
+
+            if [ "$MODE" = "configure" ]; then
+              key="$(grep -E '^OPENAI_API_KEY=' "$ENV_FILE" | tail -1 | cut -d= -f2- | tr -d "\"' " || true)"
+              if [ -z "$key" ]; then
+                echo "OPENAI_API_KEY is missing from $ENV_FILE; refusing to change models."
+                exit 1
+              fi
+              case "$key" in
+                sk-or-*) provider=openrouter ;;
+                *) provider=openai ;;
+              esac
+              echo "Key provider: $provider"
+              echo "Before:"
+              grep -E '^OPENAI_(MODEL|NAV_MODEL|BASE_URL)=' "$ENV_FILE" || echo "  (none set)"
+
+              cp "$ENV_FILE" "$ENV_FILE.bak-$(date +%Y%m%d%H%M%S)"
+              set_var() {
+                if grep -qE "^$1=" "$ENV_FILE"; then
+                  sed -i "s|^$1=.*|$1=$2|" "$ENV_FILE"
+                else
+                  printf '\n%s=%s\n' "$1" "$2" >> "$ENV_FILE"
+                fi
+              }
+              if [ "$provider" = "openrouter" ]; then
+                set_var OPENAI_BASE_URL https://openrouter.ai/api/v1
+                set_var OPENAI_MODEL openai/gpt-4o-mini
+                set_var OPENAI_NAV_MODEL openai/gpt-4o
+              else
+                set_var OPENAI_MODEL gpt-4o-mini
+                set_var OPENAI_NAV_MODEL gpt-4o
+              fi
+              echo "After:"
+              grep -E '^OPENAI_(MODEL|NAV_MODEL|BASE_URL)=' "$ENV_FILE"
+
+              cd docker
+              $COMPOSE up -d --force-recreate --no-deps discovery-worker ai-worker
+              sleep 10
+              $COMPOSE ps discovery-worker ai-worker
+              echo "==> discovery-worker startup"
+              $COMPOSE logs --tail=60 discovery-worker 2>&1 | grep -iE 'Discovery worker started|error|invalid' | tail -10 || true
+            else
+              cd docker
+              echo "==> discovery-worker course discovery (since ${SINCE:-2h})"
+              $COMPOSE logs --since "${SINCE:-2h}" discovery-worker 2>&1 \
+                | grep -E 'Discovery worker started|Deep scrape courses home|Courses from LMS adapter|not trustworthy|Portal agent step|Portal agent finished|Learned path|Scraped courses|Scraped assignments|Scraped timetable|LLM extraction failed|Portal agent crashed|Deep scrape phase failed|Deep scrape complete|Portal agent decision failed' \
+                | tail -200 || echo "(no matching lines)"
+            fi
