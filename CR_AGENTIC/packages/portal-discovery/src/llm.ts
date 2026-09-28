@@ -11,6 +11,9 @@ export class OpenAiCompletionClient implements LlmCompletionClient {
     private readonly apiKey: string | undefined,
     private readonly model: string,
     private readonly baseURL?: string,
+    // Providers like OpenRouter reserve credit for the full max_tokens, so an
+    // uncapped request can be rejected even when the reply is tiny.
+    private readonly maxTokens = 2048,
   ) {}
 
   private getClient() {
@@ -35,6 +38,7 @@ export class OpenAiCompletionClient implements LlmCompletionClient {
       const response = await client.chat.completions.create({
         model: this.model,
         response_format: { type: 'json_object' },
+        max_tokens: this.maxTokens,
         messages,
       });
       return response.choices[0]?.message?.content ?? '{}';
@@ -45,6 +49,7 @@ export class OpenAiCompletionClient implements LlmCompletionClient {
       if (!isJsonModeUnsupported(err)) throw err;
       const response = await client.chat.completions.create({
         model: this.model,
+        max_tokens: this.maxTokens,
         messages,
       });
       return extractJsonObject(response.choices[0]?.message?.content ?? '{}');

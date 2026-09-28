@@ -1,5 +1,8 @@
 import { z } from 'zod';
 
+const emptyToUndefined = (v: unknown) =>
+  typeof v === 'string' && v.trim() === '' ? undefined : v;
+
 export const agentEnvSchema = z.object({
   AGENT_API_PORT: z.coerce.number().default(3100),
   JWT_SECRET: z.string().min(1),
@@ -22,7 +25,10 @@ export const agentEnvSchema = z.object({
   OPENAI_MODEL: z.string().default('gpt-4o'),
   // Optional override for OpenAI-compatible providers (e.g. OpenRouter:
   // https://openrouter.ai/api/v1). Leave unset to use OpenAI directly.
-  OPENAI_BASE_URL: z.string().url().optional(),
+  OPENAI_BASE_URL: z.preprocess(emptyToUndefined, z.string().url().optional()),
+  // Stronger model for multi-step portal navigation decisions. Falls back to
+  // OPENAI_MODEL when unset.
+  OPENAI_NAV_MODEL: z.preprocess(emptyToUndefined, z.string().optional()),
   PORTAL_SEARCH_API_KEY: z.string().optional(),
   PORTAL_SEARCH_ENDPOINT: z.string().default('https://google.serper.dev/search'),
   BROWSER_MAX_CONTEXTS: z.coerce.number().default(50),

@@ -30,11 +30,24 @@ async function main() {
     env.OPENAI_MODEL,
     env.OPENAI_BASE_URL,
   );
+  // Navigation replies are one small JSON action; course lists need more room.
+  const navLlm = new OpenAiCompletionClient(
+    env.OPENAI_API_KEY,
+    env.OPENAI_NAV_MODEL ?? env.OPENAI_MODEL,
+    env.OPENAI_BASE_URL,
+    400,
+  );
+  const extractLlm = new OpenAiCompletionClient(
+    env.OPENAI_API_KEY,
+    env.OPENAI_MODEL,
+    env.OPENAI_BASE_URL,
+    1500,
+  );
   const discovery = new PortalDiscoveryService(search, llm);
   const findPortal = new FindPortalProcessor(discovery);
 
   const browser = createDiscoveryBrowser();
-  const deepScrape = new DeepScrapeProcessor(redis, browser, llm);
+  const deepScrape = new DeepScrapeProcessor(redis, browser, extractLlm, navLlm);
 
   const workers = [
     createWorker<DiscoveryFindPortalJob>(
@@ -73,7 +86,10 @@ async function main() {
     });
   }
 
-  logger.info('Discovery worker started');
+  logger.info(
+    { extractionModel: env.OPENAI_MODEL, navModel: env.OPENAI_NAV_MODEL ?? env.OPENAI_MODEL },
+    'Discovery worker started',
+  );
 
   const shutdown = async () => {
     await Promise.all(workers.map((w) => w.close()));
