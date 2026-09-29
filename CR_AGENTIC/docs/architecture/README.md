@@ -10,8 +10,11 @@ CR_AGENTIC implements the approved Phase 1 architecture:
 ## Internal API (main backend)
 
 Configure `INTERNAL_API_SECRET` in both the main `.env` and `CR_AGENTIC/.env`.
+Set `COURSE_REP_API_URL` to the main API origin **plus** the Nest global
+`/api` prefix (e.g. `https://api.courserep.ng/api`). Agent clients keep path
+strings as `/internal/...` and append them to that base.
 
-Endpoints:
+Endpoints (behind the main API `/api` prefix):
 
 - `GET /internal/users/:id`
 - `POST /internal/materials/import-from-agent`

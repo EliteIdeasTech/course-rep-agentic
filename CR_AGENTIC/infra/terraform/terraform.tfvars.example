@@ -1,7 +1,7 @@
 aws_region         = "us-east-1"
 environment        = "production"
 name_prefix        = "cr-agentic"
-course_rep_api_url = "https://api.courserep.example.com"
+course_rep_api_url = "https://api.courserep.example.com/api"
 
 # Supply an ACM certificate ARN to enable the HTTPS listener.
 certificate_arn = ""
