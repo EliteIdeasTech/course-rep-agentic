@@ -11,6 +11,7 @@ import type { DiscoveryDeepScrapeJob } from '@cr-agentic/shared';
 import { writeAuditLog } from '@cr-agentic/observability';
 import { REDIS_CLIENT } from '../queue/queue.module';
 import { OnboardingService } from './onboarding.service';
+import { LoginService } from './login.service';
 import { ApplyResultsRequestDto } from './dto/onboarding.request.dto';
 
 @Injectable()
@@ -18,6 +19,7 @@ export class DeepDiscoveryService {
   constructor(
     @Inject(REDIS_CLIENT) private readonly redis: Redis,
     private readonly onboarding: OnboardingService,
+    private readonly login: LoginService,
   ) {}
 
   /** Starts the sequential deep-scrape pipeline once a session has been captured. */
@@ -133,7 +135,9 @@ export class DeepDiscoveryService {
 
   /** Records the user's import selections and completes onboarding. */
   async applyResults(userId: string, sessionId: string, dto: ApplyResultsRequestDto) {
-    const session = await this.onboarding.requireSession(userId, sessionId);
+    const claimed = await this.login.ensureClaimedIdentity(userId, sessionId);
+    const actorId = claimed.userId;
+    const session = await this.onboarding.requireSession(actorId, sessionId);
 
     if (dto.courseIds) {
       await prisma.discoveredCourse.updateMany({
@@ -189,7 +193,7 @@ export class DeepDiscoveryService {
     });
 
     await writeAuditLog({
-      actorId: userId,
+      actorId,
       action: 'onboarding_results_applied',
       resourceType: 'onboarding_session',
       resourceId: sessionId,

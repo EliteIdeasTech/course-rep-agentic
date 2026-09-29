@@ -3,6 +3,8 @@ import { prisma } from '@cr-agentic/database';
 import { writeAuditLog } from '@cr-agentic/observability';
 import { CourseRepClient } from '../../integrations/course-rep/course-rep.client';
 import { OnboardingService } from './onboarding.service';
+import { LoginService } from './login.service';
+import { courseRepUserIdForSync } from './onboarding-identity';
 
 const EVENT_CONCURRENCY = 8;
 /** Leave headroom under Cloudflare's ~100s proxy limit. */
@@ -15,14 +17,20 @@ export class SyncService {
   constructor(
     private readonly courseRep: CourseRepClient,
     private readonly onboarding: OnboardingService,
+    private readonly login: LoginService,
   ) {}
 
   /**
    * Pushes the user's selected discovered courses, assignments, timetable slots,
    * and calendar events to the main Course Rep API.
+   *
+   * Always imports as the claimed Course Rep userId — never the provisional
+   * guest UUID. If mobile skipped/swallowed claim-identity, we claim here.
    */
   async syncToCourseRep(userId: string, sessionId: string) {
-    const session = await this.onboarding.requireSession(userId, sessionId);
+    const claimed = await this.login.ensureClaimedIdentity(userId, sessionId);
+    const session = await this.onboarding.requireSession(claimed.userId, sessionId);
+    const courseRepUserId = courseRepUserIdForSync(session);
 
     const courses = await prisma.discoveredCourse.findMany({
       where: { onboardingSessionId: sessionId, selected: true },
@@ -43,7 +51,7 @@ export class SyncService {
       let result: { imported: number };
       try {
         result = await this.courseRep.importCourses({
-          userId,
+          userId: courseRepUserId,
           courses: courses.map((c) => ({
             code: c.code ?? c.externalId ?? c.title,
             title: c.title,
@@ -71,7 +79,7 @@ export class SyncService {
         kind: 'assignment',
         run: async () => {
           await this.courseRep.createStudyPlanEvent({
-            userId,
+            userId: courseRepUserId,
             type: this.mapAssignmentType(assignment.eventType),
             title: assignment.title,
             dueAt: assignment.dueAt ?? undefined,
@@ -87,7 +95,7 @@ export class SyncService {
         run: async () => {
           try {
             await this.courseRep.createStudyPlanEvent({
-              userId,
+              userId: courseRepUserId,
               type: 'class_session',
               title: slot.title,
               startsAt: slot.startsAt ?? undefined,
@@ -102,7 +110,7 @@ export class SyncService {
             });
           } catch {
             await this.courseRep.createStudyPlanEvent({
-              userId,
+              userId: courseRepUserId,
               type: 'outside_activity',
               title: slot.title,
               startsAt: slot.startsAt ?? undefined,
@@ -126,7 +134,7 @@ export class SyncService {
         kind: 'calendar',
         run: async () => {
           await this.courseRep.createStudyPlanEvent({
-            userId,
+            userId: courseRepUserId,
             type: this.mapEventType(event.eventType),
             title: event.title,
             startsAt: event.startsAt ?? undefined,
@@ -182,10 +190,10 @@ export class SyncService {
       data: { lastSyncAt: new Date() },
     });
 
-    await this.courseRep.recomputeStudyPlan(userId).catch(() => undefined);
+    await this.courseRep.recomputeStudyPlan(courseRepUserId).catch(() => undefined);
 
     await writeAuditLog({
-      actorId: userId,
+      actorId: courseRepUserId,
       action: 'onboarding_synced_to_course_rep',
       resourceType: 'onboarding_session',
       resourceId: sessionId,

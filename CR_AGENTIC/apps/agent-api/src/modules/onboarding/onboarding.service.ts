@@ -5,6 +5,7 @@ import { writeAuditLog } from '@cr-agentic/observability';
 import { assertTransition, isTerminal } from './onboarding-state-machine';
 import { CourseRepClient } from '../../integrations/course-rep/course-rep.client';
 import { StartOnboardingRequestDto } from './dto/onboarding.request.dto';
+import { asSessionMetadata } from './onboarding-identity';
 
 const ONBOARDING_TTL_MS = 24 * 60 * 60 * 1000;
 
@@ -106,7 +107,7 @@ export class OnboardingService {
       where: { id: sessionId },
       data: {
         metadata: {
-          ...((session.metadata as object) ?? {}),
+          ...asSessionMetadata(session.metadata),
           isGuest: true,
           guestTokenHash: guest.tokenHash,
           guestTokenExpiresAt: guest.expiresAt.toISOString(),

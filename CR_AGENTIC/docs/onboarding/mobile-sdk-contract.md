@@ -216,4 +216,12 @@ sessions expire after 24 hours.
   secret and do not log it.
 - Captured sessions are encrypted at rest (AES-256-GCM) in S3 by the server.
 - Guest onboarding uses `X-Onboarding-Guest-Token` until `claim-identity`
-  issues a Course Rep JWT.
+  issues a Course Rep JWT. Keep sending the guest header through apply/sync
+  until the claim JWT is stored. The agent persists the guest token hash on
+  `onboarding_sessions.metadata` (Postgres); Redis is not used to verify it.
+- **Do not swallow `claim-identity` failures.** Import must not continue with a
+  missing/stale JWT. If claim fails, surface the error instead of calling
+  `apply-results` / `sync-to-course-rep` half-authenticated. The agent will
+  also claim during apply/sync when the guest token is still valid, but a
+  missing token returns a clear 401 rather than importing as the provisional
+  guest `userId`.

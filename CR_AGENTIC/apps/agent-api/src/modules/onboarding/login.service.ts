@@ -3,7 +3,7 @@ import { ConfigService } from '@nestjs/config';
 import { JwtService } from '@nestjs/jwt';
 import Redis from 'ioredis';
 import { randomUUID } from 'crypto';
-import { prisma } from '@cr-agentic/database';
+import { prisma, Prisma } from '@cr-agentic/database';
 import { enqueueJob } from '@cr-agentic/queue';
 import { QUEUE_NAMES } from '@cr-agentic/shared';
 import type { BrowserCredentialLoginJob } from '@cr-agentic/shared';
@@ -21,9 +21,17 @@ import {
   createBridgeToken,
   verifyBridgeToken,
   createGuestToken,
-  verifyGuestToken,
+  inspectGuestToken,
 } from './bridge-token';
 import { CourseRepClient } from '../../integrations/course-rep/course-rep.client';
+import {
+  actorAuthErrorMessage,
+  asSessionMetadata,
+  buildClaimedSessionMetadata,
+  isUnclaimedGuestSession,
+  resolveOnboardingActorFromSession,
+} from './onboarding-identity';
+import { claimJwtSignOptions, jwtExpiresInSeconds } from '../auth/jwt-options';
 
 const BROWSER_SESSION_TTL_MS = 30 * 24 * 60 * 60 * 1000;
 const CREDENTIALS_TTL_SEC = 300;
@@ -33,6 +41,7 @@ const CREDENTIALS_KEY_PREFIX = 'cr:agent:creds:';
 export class LoginService {
   private readonly bridgeSecret: string;
   private readonly crypto: SessionCrypto;
+  private readonly config: ConfigService;
 
   constructor(
     @Inject(REDIS_CLIENT) private readonly redis: Redis,
@@ -42,6 +51,7 @@ export class LoginService {
     private readonly jwtService: JwtService,
     config: ConfigService,
   ) {
+    this.config = config;
     this.bridgeSecret = config.get<string>('SESSION_ENCRYPTION_KEY', '');
     this.crypto = new SessionCrypto(this.bridgeSecret || 'dev-session-key');
   }
@@ -155,7 +165,8 @@ export class LoginService {
 
   /**
    * After SESSION_CAPTURED (and ideally profile scrape), upsert a Course Rep
-   * user from the portal profile and issue a JWT. Remaps guest sessions.
+   * user from the portal profile and issue a JWT. Remaps guest sessions from
+   * the provisional UUID onto the real Course Rep userId before returning.
    */
   async claimIdentity(userId: string, sessionId: string) {
     const session = await this.onboarding.requireSession(userId, sessionId);
@@ -171,81 +182,46 @@ export class LoginService {
     let upserted;
     try {
       upserted = await this.courseRep.upsertUserFromPortal({
-      email,
-      displayName,
-      universityId: session.universityId ?? undefined,
-      universityName: session.universityName,
-      departmentName: profile?.departmentName ?? session.departmentName ?? undefined,
-      academicLevelName:
-        profile?.academicLevelName ?? session.academicLevelName ?? undefined,
-      studentId: profile?.studentId ?? undefined,
-    });
+        email,
+        displayName,
+        universityId: session.universityId ?? undefined,
+        universityName: session.universityName,
+        departmentName: profile?.departmentName ?? session.departmentName ?? undefined,
+        academicLevelName:
+          profile?.academicLevelName ?? session.academicLevelName ?? undefined,
+        studentId: profile?.studentId ?? undefined,
+      });
     } catch (err) {
       const msg = err instanceof Error ? err.message : 'Course Rep identity upsert failed';
       throw new BadGatewayException(msg);
     }
 
     const realUserId = upserted.userId;
-
-    // Remap all agent rows from guest/provisional userId → real userId.
-    if (realUserId !== userId) {
-      await prisma.$transaction([
-        prisma.onboardingSession.update({
-          where: { id: sessionId },
-          data: {
-            userId: realUserId,
-            metadata: {
-              ...((session.metadata as object) ?? {}),
-              isGuest: false,
-              previousUserId: userId,
-              claimedAt: new Date().toISOString(),
-            },
-          },
-        }),
-        prisma.connectedAccount.updateMany({
-          where: { onboardingSessionId: sessionId },
-          data: { userId: realUserId },
-        }),
-        prisma.discoveredCourse.updateMany({
-          where: { onboardingSessionId: sessionId },
-          data: { userId: realUserId },
-        }),
-        prisma.discoveredAssignment.updateMany({
-          where: { onboardingSessionId: sessionId },
-          data: { userId: realUserId },
-        }),
-        prisma.discoveredTimetableSlot.updateMany({
-          where: { onboardingSessionId: sessionId },
-          data: { userId: realUserId },
-        }),
-        prisma.discoveredPortalProfile.updateMany({
-          where: { onboardingSessionId: sessionId },
-          data: { userId: realUserId },
-        }),
-        prisma.discoveredCalendarEvent.updateMany({
-          where: { onboardingSessionId: sessionId },
-          data: { userId: realUserId },
-        }),
-        prisma.discoveredAcademicRecord.updateMany({
-          where: { onboardingSessionId: sessionId },
-          data: { userId: realUserId },
-        }),
-      ]);
-    }
-
-    const accessToken = await this.jwtService.signAsync({
-      sub: realUserId,
-      email: upserted.email,
-      username: upserted.username ?? upserted.email,
-      roles: ['user'],
-      permissions: [],
+    const remapped = await this.remapOnboardingOwner({
+      sessionId,
+      fromUserId: session.userId,
+      toUserId: realUserId,
+      metadata: session.metadata,
     });
+
+    const expiresIn = jwtExpiresInSeconds(this.config);
+    const accessToken = await this.jwtService.signAsync(
+      {
+        sub: realUserId,
+        email: upserted.email,
+        username: upserted.username ?? upserted.email,
+        roles: ['user'],
+        permissions: [],
+      },
+      claimJwtSignOptions(this.config),
+    );
 
     await writeAuditLog({
       actorId: realUserId,
       action: 'onboarding_identity_claimed',
       resourceType: 'onboarding_session',
       resourceId: sessionId,
+      metadata: { remapped, previousUserId: session.userId },
     });
 
     return {
@@ -253,7 +229,7 @@ export class LoginService {
       email: upserted.email,
       accessToken,
       refreshToken: upserted.refreshToken ?? null,
-      expiresIn: 3600,
+      expiresIn,
       tokenType: 'Bearer' as const,
       user: {
         id: realUserId,
@@ -263,6 +239,91 @@ export class LoginService {
         academicLevelId: upserted.academicLevelId,
       },
     };
+  }
+
+  /**
+   * If the session is still a guest, run claim-identity (upsert + remap) so
+   * apply/sync never talk to Course Rep as the provisional UUID. Idempotent
+   * when already claimed.
+   */
+  async ensureClaimedIdentity(userId: string, sessionId: string) {
+    const session = await this.onboarding.requireSession(userId, sessionId);
+    if (!isUnclaimedGuestSession(session)) {
+      return { userId: session.userId, alreadyClaimed: true as const };
+    }
+    const claimed = await this.claimIdentity(userId, sessionId);
+    return {
+      userId: claimed.userId,
+      alreadyClaimed: false as const,
+      accessToken: claimed.accessToken,
+    };
+  }
+
+  /**
+   * Persistently remap every agent row for this session from the provisional
+   * guest userId onto the Course Rep user returned by upsert-from-portal.
+   * Guest token hash stays in metadata so in-flight clients remain authenticated.
+   */
+  async remapOnboardingOwner(params: {
+    sessionId: string;
+    fromUserId: string;
+    toUserId: string;
+    metadata: unknown;
+  }): Promise<boolean> {
+    const { sessionId, fromUserId, toUserId, metadata } = params;
+    if (fromUserId === toUserId) {
+      const meta = asSessionMetadata(metadata);
+      if (meta.isGuest === false && meta.claimedAt) {
+        return false;
+      }
+      await prisma.onboardingSession.update({
+        where: { id: sessionId },
+        data: {
+          metadata: buildClaimedSessionMetadata(metadata, fromUserId) as Prisma.InputJsonValue,
+        },
+      });
+      return false;
+    }
+
+    const claimedMetadata = buildClaimedSessionMetadata(metadata, fromUserId);
+    await prisma.$transaction([
+      prisma.onboardingSession.update({
+        where: { id: sessionId },
+        data: {
+          userId: toUserId,
+          metadata: claimedMetadata as Prisma.InputJsonValue,
+        },
+      }),
+      prisma.connectedAccount.updateMany({
+        where: { onboardingSessionId: sessionId },
+        data: { userId: toUserId },
+      }),
+      prisma.discoveredCourse.updateMany({
+        where: { onboardingSessionId: sessionId },
+        data: { userId: toUserId },
+      }),
+      prisma.discoveredAssignment.updateMany({
+        where: { onboardingSessionId: sessionId },
+        data: { userId: toUserId },
+      }),
+      prisma.discoveredTimetableSlot.updateMany({
+        where: { onboardingSessionId: sessionId },
+        data: { userId: toUserId },
+      }),
+      prisma.discoveredPortalProfile.updateMany({
+        where: { onboardingSessionId: sessionId },
+        data: { userId: toUserId },
+      }),
+      prisma.discoveredCalendarEvent.updateMany({
+        where: { onboardingSessionId: sessionId },
+        data: { userId: toUserId },
+      }),
+      prisma.discoveredAcademicRecord.updateMany({
+        where: { onboardingSessionId: sessionId },
+        data: { userId: toUserId },
+      }),
+    ]);
+    return true;
   }
 
   /**
@@ -352,36 +413,20 @@ export class LoginService {
     });
     if (!session) throw new NotFoundException('Onboarding session not found');
 
-    if (jwtUserId && jwtUserId === session.userId) {
-      return jwtUserId;
+    const resolved = resolveOnboardingActorFromSession({
+      sessionUserId: session.userId,
+      metadata: session.metadata,
+      jwtUserId,
+      guestToken,
+      inspectGuestToken: (token, storedHash, expiresAt) =>
+        inspectGuestToken(token, sessionId, this.bridgeSecret, storedHash, expiresAt),
+    });
+
+    if (resolved.ok) {
+      return resolved.userId;
     }
 
-    const meta = (session.metadata ?? {}) as {
-      isGuest?: boolean;
-      guestTokenHash?: string;
-      guestTokenExpiresAt?: string;
-    };
-
-    if (guestToken && meta.guestTokenHash && meta.guestTokenExpiresAt) {
-      const ok = verifyGuestToken(
-        guestToken,
-        sessionId,
-        this.bridgeSecret,
-        meta.guestTokenHash,
-        new Date(meta.guestTokenExpiresAt),
-      );
-      if (ok) return session.userId;
-    }
-
-    if (jwtUserId) {
-      // Allow JWT user that owns the session after claim remap
-      const owned = await prisma.onboardingSession.findFirst({
-        where: { id: sessionId, userId: jwtUserId },
-      });
-      if (owned) return jwtUserId;
-    }
-
-    throw new UnauthorizedException('Authentication required for this onboarding session');
+    throw new UnauthorizedException(actorAuthErrorMessage(resolved.reason));
   }
 
   issueGuestToken(sessionId: string): { token: string; tokenHash: string; expiresAt: Date } {

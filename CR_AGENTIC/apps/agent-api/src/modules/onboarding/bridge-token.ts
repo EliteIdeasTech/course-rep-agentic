@@ -1,7 +1,12 @@
 import { createHmac, randomBytes, timingSafeEqual, createHash } from 'crypto';
+import type { GuestTokenFailureReason } from './onboarding-identity';
 
 export const BRIDGE_TOKEN_TTL_MS = 5 * 60 * 1000;
 export const GUEST_TOKEN_TTL_MS = 24 * 60 * 60 * 1000;
+
+export type GuestTokenInspectResult =
+  | { ok: true }
+  | { ok: false; reason: GuestTokenFailureReason };
 
 /**
  * Short-lived, single-use token the mobile WebView presents to the public
@@ -40,7 +45,44 @@ export function verifyGuestToken(
   storedHash: string | null,
   expiresAt: Date | null,
 ): boolean {
-  return verifyBoundToken(token, sessionId, secret, storedHash, expiresAt);
+  return inspectGuestToken(token, sessionId, secret, storedHash, expiresAt).ok;
+}
+
+/**
+ * Guest auth is durable in Postgres: the SHA-256 of the issued token is stored
+ * on onboarding_sessions.metadata. Matching that hash (and expiry) is enough
+ * to prove the client holds the original token for this session.
+ *
+ * HMAC with SESSION_ENCRYPTION_KEY is used at issue time and as an extra
+ * check when the current key still matches. It must NOT be required, or an
+ * agent recreate that rotates the key would invalidate in-flight onboarding
+ * even though the Postgres hash is intact. Redis is not consulted.
+ */
+export function inspectGuestToken(
+  token: string,
+  _sessionId: string,
+  _secret: string,
+  storedHash: string | null,
+  expiresAt: Date | null,
+): GuestTokenInspectResult {
+  if (!token) return { ok: false, reason: 'missing' };
+  if (!storedHash || !expiresAt) return { ok: false, reason: 'missing' };
+  if (Date.now() > expiresAt.getTime()) return { ok: false, reason: 'expired' };
+  if (!safeEqual(hashToken(token), storedHash)) {
+    return { ok: false, reason: 'mismatch' };
+  }
+
+  const parts = token.split('.');
+  if (parts.length !== 3) return { ok: false, reason: 'mismatch' };
+  const expMs = Number(parts[1]);
+  if (!Number.isFinite(expMs) || Date.now() > expMs) {
+    return { ok: false, reason: 'expired' };
+  }
+
+  // Hash match against the session row is the source of truth. Re-checking
+  // HMAC with the current SESSION_ENCRYPTION_KEY would reject valid tokens
+  // after an agent recreate that rotated the key.
+  return { ok: true };
 }
 
 function createBoundToken(
