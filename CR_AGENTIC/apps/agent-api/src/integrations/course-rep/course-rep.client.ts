@@ -1,5 +1,9 @@
 import { Injectable } from '@nestjs/common';
 import { ConfigService } from '@nestjs/config';
+import type {
+  ImportCoursesFromAgentRequest,
+  ImportCoursesFromAgentResponse,
+} from './import-courses.payload';
 
 export interface CourseRepUser {
   id: string;
@@ -99,10 +103,16 @@ export class CourseRepClient {
     });
   }
 
+  /**
+   * Upserts the full scraped catalog. Each course carries `offered` so the
+   * main API can offer the selection and leave the rest unoffered.
+   * Requires the backend import contract that accepts `offered` (see
+   * import-courses.payload.ts). The current main API rejects unknown fields.
+   */
   async importCourses(
-    payload: Record<string, unknown>,
-  ): Promise<{ imported: number }> {
-    return this.request<{ imported: number }>(
+    payload: ImportCoursesFromAgentRequest,
+  ): Promise<ImportCoursesFromAgentResponse> {
+    return this.request<ImportCoursesFromAgentResponse>(
       '/internal/courses/import-from-agent',
       {
         method: 'POST',

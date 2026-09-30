@@ -17,6 +17,7 @@ import { SyncService } from './sync.service';
 import {
   ApplyResultsRequestDto,
   ConfirmPortalRequestDto,
+  CourseImportSelectionDto,
   CredentialLoginRequestDto,
   LoginBridgeRequestDto,
   ManualPortalRequestDto,
@@ -217,9 +218,10 @@ export class OnboardingController {
   async syncToCourseRep(
     @CurrentUser('id') userId: string | undefined,
     @Param('sessionId') sessionId: string,
+    @Body() dto: CourseImportSelectionDto,
     @Headers('x-onboarding-guest-token') guestToken?: string,
   ) {
     const actor = await this.login.resolveActor(sessionId, userId, guestToken);
-    return this.sync.syncToCourseRep(actor, sessionId);
+    return this.sync.syncToCourseRep(actor, sessionId, dto);
   }
 }

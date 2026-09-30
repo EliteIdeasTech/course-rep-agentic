@@ -520,6 +520,7 @@ model DiscoveredCourse {
   semester            String?
   instructor          String?
   rawHtmlS3Key        String?
+  /// Student offers this scraped course. Sync still upserts every row; false means unoffered.
   selected            Boolean  @default(true)
   syncedAt            DateTime?
   createdAt           DateTime @default(now())
