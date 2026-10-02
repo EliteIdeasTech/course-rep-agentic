@@ -2,11 +2,11 @@
 # read discovery-worker agent logs, without shell access to the VPS.
 #
 #   configure: if the GEMINI_API_KEY Actions secret is set, writes it into
-#              OPENAI_API_KEY first (the value is never printed). Then detects
-#              the key provider (OpenRouter keys start with sk-or-, Gemini keys
-#              with AIza, otherwise OpenAI), backs up .env, sets OPENAI_MODEL /
-#              OPENAI_NAV_MODEL (and OPENAI_BASE_URL for OpenRouter and Gemini),
-#              then recreates the workers.
+#              OPENAI_API_KEY (the value is never printed) and points
+#              OPENAI_BASE_URL, OPENAI_MODEL, and OPENAI_NAV_MODEL at Gemini.
+#              If that secret is absent, detects OpenRouter (sk-or-) or OpenAI
+#              from the key already in .env, backs up .env, sets the matching
+#              models, then recreates the workers.
 #   logs:      prints recent course-discovery lines from discovery-worker.
 #
 # Never prints OPENAI_API_KEY, GEMINI_API_KEY, or any other secret.
@@ -93,9 +93,11 @@ jobs:
                 rm -f "$tmp"
               }
 
-              # Install the Actions secret before provider detection. Absent or
-              # whitespace-only secret leaves the key already in .env untouched.
-              # Trim ends so a copied trailing newline is not written into .env.
+              # Gemini is selected only when the Actions secret is present.
+              # The key itself is not inspected (prefixes vary). An absent or
+              # whitespace-only secret keeps the key already in .env and uses
+              # OpenRouter (sk-or-) or OpenAI. Trim ends so a copied trailing
+              # newline is not written into .env. The value is never printed.
               gemini_key="${GEMINI_API_KEY:-}"
               gemini_key="${gemini_key#"${gemini_key%%[![:space:]]*}"}"
               gemini_key="${gemini_key%"${gemini_key##*[![:space:]]}"}"
@@ -103,23 +105,22 @@ jobs:
                 backup_env
                 set_var OPENAI_API_KEY "$gemini_key"
                 unset gemini_key GEMINI_API_KEY
+                provider=gemini
                 echo "Wrote GEMINI_API_KEY into OPENAI_API_KEY."
               else
                 unset gemini_key
                 echo "GEMINI_API_KEY is not set; keeping OPENAI_API_KEY from .env."
+                key="$(grep -E '^OPENAI_API_KEY=' "$ENV_FILE" | tail -1 | cut -d= -f2- | tr -d "\"' " || true)"
+                if [ -z "$key" ]; then
+                  echo "OPENAI_API_KEY is missing from $ENV_FILE; refusing to change models."
+                  exit 1
+                fi
+                case "$key" in
+                  sk-or-*) provider=openrouter ;;
+                  *) provider=openai ;;
+                esac
+                unset key
               fi
-
-              key="$(grep -E '^OPENAI_API_KEY=' "$ENV_FILE" | tail -1 | cut -d= -f2- | tr -d "\"' " || true)"
-              if [ -z "$key" ]; then
-                echo "OPENAI_API_KEY is missing from $ENV_FILE; refusing to change models."
-                exit 1
-              fi
-              case "$key" in
-                sk-or-*) provider=openrouter ;;
-                AIza*) provider=gemini ;;
-                *) provider=openai ;;
-              esac
-              unset key
               echo "Key provider: $provider"
               echo "Before:"
               grep -E '^OPENAI_(MODEL|NAV_MODEL|BASE_URL)=' "$ENV_FILE" || echo "  (none set)"
