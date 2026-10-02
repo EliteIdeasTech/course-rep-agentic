@@ -24,7 +24,9 @@ export const agentEnvSchema = z.object({
   OPENAI_API_KEY: z.string().optional(),
   OPENAI_MODEL: z.string().default('gpt-4o'),
   // Optional override for OpenAI-compatible providers (e.g. OpenRouter:
-  // https://openrouter.ai/api/v1). Leave unset to use OpenAI directly.
+  // https://openrouter.ai/api/v1, Gemini:
+  // https://generativelanguage.googleapis.com/v1beta/openai/).
+  // Leave unset to use OpenAI directly.
   OPENAI_BASE_URL: z.preprocess(emptyToUndefined, z.string().url().optional()),
   // Stronger model for multi-step portal navigation decisions. Falls back to
   // OPENAI_MODEL when unset.
