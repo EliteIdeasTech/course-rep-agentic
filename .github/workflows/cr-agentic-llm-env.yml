@@ -1,12 +1,15 @@
 # Configure the LLM model tiers in the Contabo server's CR_AGENTIC/.env and
 # read discovery-worker agent logs, without shell access to the VPS.
 #
-#   configure: detects the key provider (OpenRouter keys start with sk-or-),
-#              backs up .env, sets OPENAI_MODEL / OPENAI_NAV_MODEL (and
-#              OPENAI_BASE_URL for OpenRouter), then recreates the workers.
+#   configure: if the GEMINI_API_KEY Actions secret is set, writes it into
+#              OPENAI_API_KEY first (the value is never printed). Then detects
+#              the key provider (OpenRouter keys start with sk-or-, Gemini keys
+#              with AIza, otherwise OpenAI), backs up .env, sets OPENAI_MODEL /
+#              OPENAI_NAV_MODEL (and OPENAI_BASE_URL for OpenRouter and Gemini),
+#              then recreates the workers.
 #   logs:      prints recent course-discovery lines from discovery-worker.
 #
-# Never prints OPENAI_API_KEY or any other secret.
+# Never prints OPENAI_API_KEY, GEMINI_API_KEY, or any other secret.
 
 name: CR_AGENTIC LLM env
 
@@ -40,11 +43,13 @@ jobs:
         env:
           MODE: ${{ inputs.mode }}
           SINCE: ${{ inputs.since }}
+          # Empty when the secret is unset. The remote script must not echo it.
+          GEMINI_API_KEY: ${{ secrets.GEMINI_API_KEY }}
         with:
           host: ${{ secrets.CONTABO_HOST }}
           username: ${{ secrets.CONTABO_USER }}
           key: ${{ secrets.CONTABO_SSH_KEY }}
-          envs: MODE,SINCE
+          envs: MODE,SINCE,GEMINI_API_KEY
           script_stop: true
           command_timeout: 15m
           script: |
@@ -55,6 +60,55 @@ jobs:
             COMPOSE="$DC --env-file ../.env -f docker-compose.prod.yml"
 
             if [ "$MODE" = "configure" ]; then
+              backed_up=0
+              backup_env() {
+                if [ "$backed_up" -eq 0 ]; then
+                  cp "$ENV_FILE" "$ENV_FILE.bak-$(date +%Y%m%d%H%M%S)"
+                  backed_up=1
+                fi
+              }
+              # Replace or append NAME=VALUE without echoing the value.
+              # The value is passed to awk via the environment so it is not a
+              # sed replacement (which treats \ & | specially) and is not an argv.
+              set_var() {
+                local tmp
+                tmp="$(mktemp)"
+                SET_VAR_NAME="$1" SET_VAR_VALUE="$2" awk '
+                  BEGIN {
+                    name = ENVIRON["SET_VAR_NAME"]
+                    value = ENVIRON["SET_VAR_VALUE"]
+                    found = 0
+                  }
+                  index($0, name "=") == 1 {
+                    print name "=" value
+                    found = 1
+                    next
+                  }
+                  { print }
+                  END {
+                    if (found == 0) print name "=" value
+                  }
+                ' "$ENV_FILE" > "$tmp"
+                cat "$tmp" > "$ENV_FILE"
+                rm -f "$tmp"
+              }
+
+              # Install the Actions secret before provider detection. Absent or
+              # whitespace-only secret leaves the key already in .env untouched.
+              # Trim ends so a copied trailing newline is not written into .env.
+              gemini_key="${GEMINI_API_KEY:-}"
+              gemini_key="${gemini_key#"${gemini_key%%[![:space:]]*}"}"
+              gemini_key="${gemini_key%"${gemini_key##*[![:space:]]}"}"
+              if [ -n "$gemini_key" ]; then
+                backup_env
+                set_var OPENAI_API_KEY "$gemini_key"
+                unset gemini_key GEMINI_API_KEY
+                echo "Wrote GEMINI_API_KEY into OPENAI_API_KEY."
+              else
+                unset gemini_key
+                echo "GEMINI_API_KEY is not set; keeping OPENAI_API_KEY from .env."
+              fi
+
               key="$(grep -E '^OPENAI_API_KEY=' "$ENV_FILE" | tail -1 | cut -d= -f2- | tr -d "\"' " || true)"
               if [ -z "$key" ]; then
                 echo "OPENAI_API_KEY is missing from $ENV_FILE; refusing to change models."
@@ -62,24 +116,23 @@ jobs:
               fi
               case "$key" in
                 sk-or-*) provider=openrouter ;;
+                AIza*) provider=gemini ;;
                 *) provider=openai ;;
               esac
+              unset key
               echo "Key provider: $provider"
               echo "Before:"
               grep -E '^OPENAI_(MODEL|NAV_MODEL|BASE_URL)=' "$ENV_FILE" || echo "  (none set)"
 
-              cp "$ENV_FILE" "$ENV_FILE.bak-$(date +%Y%m%d%H%M%S)"
-              set_var() {
-                if grep -qE "^$1=" "$ENV_FILE"; then
-                  sed -i "s|^$1=.*|$1=$2|" "$ENV_FILE"
-                else
-                  printf '\n%s=%s\n' "$1" "$2" >> "$ENV_FILE"
-                fi
-              }
+              backup_env
               if [ "$provider" = "openrouter" ]; then
                 set_var OPENAI_BASE_URL https://openrouter.ai/api/v1
                 set_var OPENAI_MODEL openai/gpt-4o-mini
                 set_var OPENAI_NAV_MODEL openai/gpt-4o
+              elif [ "$provider" = "gemini" ]; then
+                set_var OPENAI_BASE_URL https://generativelanguage.googleapis.com/v1beta/openai/
+                set_var OPENAI_MODEL gemini-3.8-flash
+                set_var OPENAI_NAV_MODEL gemini-3.8-flash
               else
                 set_var OPENAI_MODEL gpt-4o-mini
                 set_var OPENAI_NAV_MODEL gpt-4o
