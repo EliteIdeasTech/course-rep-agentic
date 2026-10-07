@@ -4,6 +4,12 @@ import type {
   ImportCoursesFromAgentRequest,
   ImportCoursesFromAgentResponse,
 } from './import-courses.payload';
+import {
+  httpStatusOf,
+  internalUniversityPath,
+  publicUniversityPath,
+  shouldFallbackUniversityLookup,
+} from './university-record';
 
 export interface CourseRepUser {
   id: string;
@@ -87,13 +93,23 @@ export class CourseRepClient {
   }
 
   /**
-   * Public university record. `isDemo` is the main API flag
-   * (`universities.isDemo`). Missing or non-boolean means not a demo school.
+   * University row including demo schools. Tries
+   * `GET /internal/universities/:id` (header `X-Internal-Secret`, same secret
+   * as import-from-agent). That route is not on the main API yet; a 404 falls
+   * back to public `GET /universities/:id`. Both responses may be the
+   * `{ success, data }` envelope. Callers read `isDemo` from the row inside
+   * `data` (see university-record.ts).
    */
-  async getUniversity(universityId: string): Promise<{ isDemo?: boolean }> {
-    return this.request<{ isDemo?: boolean }>(
-      `/universities/${encodeURIComponent(universityId)}`,
-    );
+  async getUniversity(universityId: string): Promise<unknown> {
+    const internalPath = internalUniversityPath(universityId);
+    try {
+      return await this.request<unknown>(internalPath);
+    } catch (error) {
+      if (!shouldFallbackUniversityLookup(httpStatusOf(error))) {
+        throw error;
+      }
+      return this.request<unknown>(publicUniversityPath(universityId));
+    }
   }
 
   /**

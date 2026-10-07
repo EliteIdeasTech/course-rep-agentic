@@ -53,9 +53,15 @@ client should poll status endpoints and render UI based on the current `stage`.
 }
 ```
 
+`universityName` is required when `universityId` is omitted. When `universityId` is
+set, `universityName` may be omitted and the agent stores the name from the main
+API. CourseRepMobile (`AgentOnboardingProvider.startGuest`) still sends both:
+`universityName` always, and `universityId` when the picker has one. A body with
+both fields remains valid.
+
 Response: `{ "onboardingSessionId": "uuid", "stage": "UNIVERSITY_SELECTED" }`
 
-When the main API university has `isDemo: true` (never matched by name or id), start
+When the loaded university row has `isDemo: true` (never matched by name or id), start
 skips portal discovery and returns:
 
 ```json

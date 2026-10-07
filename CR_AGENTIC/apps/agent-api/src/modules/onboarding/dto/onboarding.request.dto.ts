@@ -6,11 +6,13 @@ import {
   IsString,
   IsUUID,
   IsUrl,
+  ValidateIf,
   ValidateNested,
 } from 'class-validator';
 import { Type } from 'class-transformer';
 import { ApiProperty, ApiPropertyOptional } from '@nestjs/swagger';
 import { LmsType } from '@cr-agentic/shared';
+import { universityNameMustBeValidated } from '../../../integrations/course-rep/university-record';
 
 export class StartOnboardingRequestDto {
   @ApiPropertyOptional({ description: 'University id from the main Course Rep app' })
@@ -18,9 +20,13 @@ export class StartOnboardingRequestDto {
   @IsUUID()
   universityId?: string;
 
-  @ApiProperty()
+  @ApiPropertyOptional({
+    description:
+      'Required when universityId is omitted. Optional when universityId is set; the agent fills the name from the main API. CourseRepMobile still sends both.',
+  })
+  @ValidateIf((dto: StartOnboardingRequestDto) => universityNameMustBeValidated(dto))
   @IsString()
-  universityName!: string;
+  universityName?: string;
 
   @ApiPropertyOptional()
   @IsOptional()

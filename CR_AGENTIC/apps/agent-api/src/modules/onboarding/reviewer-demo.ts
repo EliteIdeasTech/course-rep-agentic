@@ -24,16 +24,16 @@ export function reviewerDemoRateLimitKey(userId: string): string {
   return `${RATE_LIMIT_PREFIX}${userId}`;
 }
 
-/**
- * True only when the main API university record has boolean `isDemo: true`.
- * Names, codes, and ids are ignored so a renamed or re-seeded school still works.
- */
-export function universityIsDemo(university: unknown): boolean {
-  if (!university || typeof university !== 'object' || Array.isArray(university)) {
-    return false;
-  }
-  return (university as Record<string, unknown>).isDemo === true;
-}
+export {
+  internalUniversityPath,
+  publicUniversityPath,
+  resolveOnboardingUniversityName,
+  shouldFallbackUniversityLookup,
+  universityDisplayName,
+  universityIsDemo,
+  universityNameMustBeValidated,
+  universityRecord,
+} from '../../integrations/course-rep/university-record';
 
 export function sessionIsDemo(metadata: unknown): boolean {
   if (!metadata || typeof metadata !== 'object' || Array.isArray(metadata)) {

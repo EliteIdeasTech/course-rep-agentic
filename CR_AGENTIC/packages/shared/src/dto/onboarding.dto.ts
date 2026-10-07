@@ -31,7 +31,8 @@ export enum DiscoveryStatus {
 
 export interface StartOnboardingDto {
   universityId?: string;
-  universityName: string;
+  /** Required unless `universityId` is set. The agent fills it from the main API when omitted. */
+  universityName?: string;
   country?: string;
   website?: string;
   departmentName?: string;

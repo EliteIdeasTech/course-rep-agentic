@@ -1,4 +1,4 @@
-import { Injectable, Logger, NotFoundException } from '@nestjs/common';
+import { BadRequestException, Injectable, Logger, NotFoundException } from '@nestjs/common';
 import { randomUUID } from 'crypto';
 import { prisma, OnboardingStage, Prisma } from '@cr-agentic/database';
 import { writeAuditLog } from '@cr-agentic/observability';
@@ -7,6 +7,7 @@ import { CourseRepClient } from '../../integrations/course-rep/course-rep.client
 import { StartOnboardingRequestDto } from './dto/onboarding.request.dto';
 import {
   demoSessionMetadata,
+  resolveOnboardingUniversityName,
   sessionIsDemo,
   universityIsDemo as universityRecordIsDemo,
 } from './reviewer-demo';
@@ -22,26 +23,28 @@ export class OnboardingService {
   async start(userId: string, dto: StartOnboardingRequestDto) {
     await this.courseRep.getUser(userId);
 
-    if (await this.universityIsDemo(dto.universityId)) {
-      return this.startReviewerDemo(userId, dto);
+    const loaded = await this.lookupUniversity(dto.universityId);
+    const resolved = this.withUniversityName(dto, loaded);
+    if (universityRecordIsDemo(loaded)) {
+      return this.startReviewerDemo(userId, resolved);
     }
 
     const session = await prisma.onboardingSession.create({
       data: {
         userId,
-        universityId: dto.universityId,
-        universityName: dto.universityName,
-        country: dto.country,
-        website: dto.website,
-        departmentName: dto.departmentName,
-        academicLevelName: dto.academicLevelName,
+        universityId: resolved.universityId,
+        universityName: resolved.universityName,
+        country: resolved.country,
+        website: resolved.website,
+        departmentName: resolved.departmentName,
+        academicLevelName: resolved.academicLevelName,
         stage: 'UNIVERSITY_SELECTED',
         expiresAt: new Date(Date.now() + ONBOARDING_TTL_MS),
       },
     });
 
     await this.recordAudit(session.id, null, 'UNIVERSITY_SELECTED', {
-      universityName: dto.universityName,
+      universityName: resolved.universityName,
     });
 
     await writeAuditLog({
@@ -49,7 +52,7 @@ export class OnboardingService {
       action: 'onboarding_started',
       resourceType: 'onboarding_session',
       resourceId: session.id,
-      metadata: { universityId: dto.universityId, universityName: dto.universityName },
+      metadata: { universityId: resolved.universityId, universityName: resolved.universityName },
     });
 
     return { onboardingSessionId: session.id, stage: session.stage };
@@ -59,7 +62,10 @@ export class OnboardingService {
    * Demo universities skip portal discovery. The session is already waiting
    * for the fixed App Review credentials.
    */
-  private async startReviewerDemo(userId: string, dto: StartOnboardingRequestDto) {
+  private async startReviewerDemo(
+    userId: string,
+    dto: StartOnboardingRequestDto & { universityName: string },
+  ) {
     const session = await prisma.onboardingSession.create({
       data: {
         userId,
@@ -99,22 +105,38 @@ export class OnboardingService {
     };
   }
 
-  /** Looks up `universities.isDemo`. Lookup failures stay on the normal path. */
-  private async universityIsDemo(universityId?: string): Promise<boolean> {
-    if (!universityId) return false;
+  /**
+   * Loads the university row used for `isDemo` and for filling a missing name.
+   * A failed lookup is not a demo school. Callers that have no client-supplied
+   * name turn that into a 400 instead of writing an empty session.
+   */
+  private async lookupUniversity(universityId?: string): Promise<unknown> {
+    if (!universityId) return undefined;
     try {
-      const university = await this.courseRep.getUniversity(universityId);
-      return universityRecordIsDemo(university);
+      return await this.courseRep.getUniversity(universityId);
     } catch (err) {
       const status =
         err && typeof err === 'object' && 'status' in err
           ? (err as { status?: number }).status
           : undefined;
       this.logger.warn(
-        `University ${universityId} isDemo lookup failed${status ? ` (${status})` : ''}; continuing without demo`,
+        `University ${universityId} lookup failed${status ? ` (${status})` : ''}; continuing without demo`,
       );
-      return false;
+      return undefined;
     }
+  }
+
+  private withUniversityName(
+    dto: StartOnboardingRequestDto,
+    university: unknown,
+  ): StartOnboardingRequestDto & { universityName: string } {
+    const universityName = resolveOnboardingUniversityName(dto.universityName, university);
+    if (!universityName) {
+      throw new BadRequestException(
+        'universityName is required when the university record cannot be loaded',
+      );
+    }
+    return { ...dto, universityName };
   }
 
   /**
@@ -126,16 +148,19 @@ export class OnboardingService {
     guest: { token: string; tokenHash: string; expiresAt: Date },
   ) {
     const provisionalUserId = randomUUID();
+    const needsName = !dto.universityName?.trim();
+    const loaded = needsName ? await this.lookupUniversity(dto.universityId) : undefined;
+    const resolved = this.withUniversityName(dto, loaded);
 
     const session = await prisma.onboardingSession.create({
       data: {
         userId: provisionalUserId,
-        universityId: dto.universityId,
-        universityName: dto.universityName,
-        country: dto.country,
-        website: dto.website,
-        departmentName: dto.departmentName,
-        academicLevelName: dto.academicLevelName,
+        universityId: resolved.universityId,
+        universityName: resolved.universityName,
+        country: resolved.country,
+        website: resolved.website,
+        departmentName: resolved.departmentName,
+        academicLevelName: resolved.academicLevelName,
         stage: 'UNIVERSITY_SELECTED',
         expiresAt: new Date(Date.now() + ONBOARDING_TTL_MS),
         metadata: {
@@ -150,7 +175,7 @@ export class OnboardingService {
     // Caller should issue the token with the session id; we accept pre-created hash
     // only when the start flow creates token after insert. See controller.
     await this.recordAudit(session.id, null, 'UNIVERSITY_SELECTED', {
-      universityName: dto.universityName,
+      universityName: resolved.universityName,
       guest: true,
     });
 
@@ -159,7 +184,7 @@ export class OnboardingService {
       action: 'onboarding_started_guest',
       resourceType: 'onboarding_session',
       resourceId: session.id,
-      metadata: { universityId: dto.universityId, universityName: dto.universityName },
+      metadata: { universityId: resolved.universityId, universityName: resolved.universityName },
     });
 
     return {
