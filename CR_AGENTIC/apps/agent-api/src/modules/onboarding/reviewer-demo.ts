@@ -25,6 +25,24 @@ export function reviewerDemoRateLimitKey(userId: string): string {
 }
 
 /**
+ * The main API wraps every JSON response (public and internal) as
+ * `{ success, message, data }`. Returns `data` for that envelope and the
+ * body unchanged otherwise, so callers work with either shape.
+ */
+export function unwrapCourseRepEnvelope<T>(body: unknown): T {
+  if (
+    body &&
+    typeof body === 'object' &&
+    !Array.isArray(body) &&
+    'success' in body &&
+    'data' in body
+  ) {
+    return (body as { data: T }).data;
+  }
+  return body as T;
+}
+
+/**
  * True only when the main API university record has boolean `isDemo: true`.
  * Names, codes, and ids are ignored so a renamed or re-seeded school still works.
  */
