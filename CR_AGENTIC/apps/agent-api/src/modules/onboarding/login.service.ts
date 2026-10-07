@@ -1,9 +1,9 @@
-import { BadGatewayException, BadRequestException, Inject, Injectable, NotFoundException, UnauthorizedException } from '@nestjs/common';
+import { BadGatewayException, BadRequestException, HttpException, HttpStatus, Inject, Injectable, NotFoundException, UnauthorizedException } from '@nestjs/common';
 import { ConfigService } from '@nestjs/config';
 import { JwtService } from '@nestjs/jwt';
 import Redis from 'ioredis';
 import { randomUUID } from 'crypto';
-import { prisma } from '@cr-agentic/database';
+import { prisma, OnboardingStage } from '@cr-agentic/database';
 import { enqueueJob } from '@cr-agentic/queue';
 import { QUEUE_NAMES } from '@cr-agentic/shared';
 import type { BrowserCredentialLoginJob } from '@cr-agentic/shared';
@@ -24,6 +24,14 @@ import {
   verifyGuestToken,
 } from './bridge-token';
 import { CourseRepClient } from '../../integrations/course-rep/course-rep.client';
+import {
+  consumeReviewerDemoAttempt,
+  coursesToImportFromProvision,
+  DEMO_INTERACTIVE_LOGIN_MESSAGE,
+  INVALID_CREDENTIALS_MESSAGE,
+  reviewerDemoCredentialsMatch,
+  sessionIsDemo,
+} from './reviewer-demo';
 
 const BROWSER_SESSION_TTL_MS = 30 * 24 * 60 * 60 * 1000;
 const CREDENTIALS_TTL_SEC = 300;
@@ -40,15 +48,18 @@ export class LoginService {
     private readonly onboarding: OnboardingService,
     private readonly courseRep: CourseRepClient,
     private readonly jwtService: JwtService,
-    config: ConfigService,
+    private readonly config: ConfigService,
   ) {
-    this.bridgeSecret = config.get<string>('SESSION_ENCRYPTION_KEY', '');
+    this.bridgeSecret = this.config.get<string>('SESSION_ENCRYPTION_KEY', '');
     this.crypto = new SessionCrypto(this.bridgeSecret || 'dev-session-key');
   }
 
   /** Opens an interactive login: issues a short-lived bridge token + the portal URL. */
   async start(userId: string, sessionId: string) {
     const session = await this.onboarding.requireSession(userId, sessionId);
+    if (sessionIsDemo(session.metadata)) {
+      throw new BadRequestException(DEMO_INTERACTIVE_LOGIN_MESSAGE);
+    }
     if (!session.selectedCandidateId) {
       throw new BadRequestException('No confirmed portal for this session');
     }
@@ -95,6 +106,9 @@ export class LoginService {
     dto: CredentialLoginRequestDto,
   ) {
     const session = await this.onboarding.requireSession(userId, sessionId);
+    if (sessionIsDemo(session.metadata)) {
+      return this.reviewerDemoLogin(userId, session, dto);
+    }
     if (!session.selectedCandidateId) {
       throw new BadRequestException('No confirmed portal for this session');
     }
@@ -151,6 +165,82 @@ export class LoginService {
     });
 
     return { status: 'in_progress' as const, stage: 'LOGIN_IN_PROGRESS' as const };
+  }
+
+  /**
+   * App Review sign-in. Compares credentials in memory, then asks the main API
+   * to provision the JWT user. Does not store the password or start Playwright.
+   */
+  private async reviewerDemoLogin(
+    userId: string,
+    session: { id: string; stage: OnboardingStage; universityId: string | null },
+    dto: CredentialLoginRequestDto,
+  ) {
+    const password = dto.password;
+    dto.password = '';
+
+    const allowed = await consumeReviewerDemoAttempt(this.redis, userId);
+    const expected = this.readReviewerPassword();
+    const matched = reviewerDemoCredentialsMatch(dto.username, password, expected);
+
+    if (!allowed) {
+      throw new HttpException(
+        'Too many login attempts. Try again later.',
+        HttpStatus.TOO_MANY_REQUESTS,
+      );
+    }
+    if (!matched) {
+      throw new UnauthorizedException(INVALID_CREDENTIALS_MESSAGE);
+    }
+
+    if (session.stage === 'ONBOARDING_COMPLETE') {
+      return { status: 'captured' as const, stage: 'ONBOARDING_COMPLETE' as const };
+    }
+    if (session.stage !== 'AWAITING_LOGIN') {
+      throw new BadRequestException(
+        `Cannot submit credentials from stage ${session.stage}`,
+      );
+    }
+    if (!session.universityId) {
+      throw new BadRequestException('Demo session is missing a university');
+    }
+
+    try {
+      const provision = await this.courseRep.provisionReviewerDemo({
+        userId,
+        universityId: session.universityId,
+      });
+      const courses = coursesToImportFromProvision(userId, provision);
+      if (courses) {
+        await this.courseRep.importCourses(courses);
+      }
+    } catch (err) {
+      const msg = err instanceof Error ? err.message : 'Reviewer demo provision failed';
+      throw new BadGatewayException(msg);
+    }
+
+    await this.onboarding.transition(
+      session.id,
+      session.stage,
+      'ONBOARDING_COMPLETE',
+      {},
+      { demo: true },
+    );
+
+    await writeAuditLog({
+      actorId: userId,
+      action: 'reviewer_demo_login_captured',
+      resourceType: 'onboarding_session',
+      resourceId: session.id,
+      metadata: { universityId: session.universityId, demo: true },
+    });
+
+    return { status: 'captured' as const, stage: 'ONBOARDING_COMPLETE' as const };
+  }
+
+  private readReviewerPassword(): string | undefined {
+    const value = this.config.get<string>('REVIEWER_PORTAL_PASSWORD');
+    return value && value.trim() !== '' ? value : undefined;
   }
 
   /**
@@ -275,6 +365,9 @@ export class LoginService {
       where: { id: dto.sessionId },
     });
     if (!session) throw new NotFoundException('Onboarding session not found');
+    if (sessionIsDemo(session.metadata)) {
+      throw new BadRequestException(DEMO_INTERACTIVE_LOGIN_MESSAGE);
+    }
 
     const valid = verifyBridgeToken(
       dto.bridgeToken,

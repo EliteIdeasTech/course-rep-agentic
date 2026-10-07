@@ -84,6 +84,9 @@ services:
     container_name: cr-agent-api
     environment:
       <<: *agent-db-env
+      # App Review password. deploy.sh passes ../.env via --env-file so this
+      # reaches the container; env_file also loads it when the value is set.
+      REVIEWER_PORTAL_PASSWORD: ${REVIEWER_PORTAL_PASSWORD:-}
     # Host Caddy terminates TLS for agent-api.courserep.ng and reverse-proxies
     # localhost:3100. Do not publish 0.0.0.0:3100 — the next Contabo deploy
     # would expose the API on the public interface.

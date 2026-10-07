@@ -16,6 +16,7 @@ import {
   ConfirmPortalRequestDto,
   ManualPortalRequestDto,
 } from './dto/onboarding.request.dto';
+import { sessionIsDemo } from './reviewer-demo';
 
 /** Keep path prefixes like /portalplus/ instead of collapsing to origin-only. */
 export function portalBaseFromLoginUrl(loginUrl: string): string {
@@ -40,6 +41,9 @@ export class PortalService {
 
   async discover(userId: string, sessionId: string) {
     const session = await this.onboarding.requireSession(userId, sessionId);
+    if (sessionIsDemo(session.metadata)) {
+      throw new BadRequestException('Portal discovery is not used for this session');
+    }
 
     await this.onboarding.transition(sessionId, session.stage, 'PORTAL_DISCOVERING');
 
