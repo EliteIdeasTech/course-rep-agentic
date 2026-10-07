@@ -20,7 +20,8 @@ Endpoints:
 - `POST /internal/study-plan/events`
 - `POST /internal/study-plan/recompute`
 - `POST /internal/notifications`
-- `GET /universities/:id` — public university record. Onboarding reads boolean `isDemo` from it and ignores name and id.
+- `GET /internal/universities/:id` — **required on the main API, not shipped yet.** Same `InternalApiGuard` and `X-Internal-Secret` as the other internal routes. Return the university by id **including `isDemo: true` rows** (do not use the public list filter). Include `id`, `name`, and `isDemo`. `@SkipResponseTransform()` is preferred so the body is the entity; if the global interceptor still wraps it, the agent reads `data.isDemo` and `data.name`. A missing university is 404. Nest URL: `/api/internal/universities/:id`.
+- `GET /universities/:id` — public fallback used only when the internal route 404s. Today this returns demo rows inside `{ success, data }`. Public lists already exclude them, and this GET may start excluding them too, so demo detection must not depend on it.
 - `POST /internal/reviewer-demo/provision` — `{ userId, universityId }` for an `isDemo` university. Same `X-Internal-Secret` as import-from-agent. Nest serves it at `/api/internal/reviewer-demo/provision`.
 
 Internal routes require header: `X-Internal-Secret: <INTERNAL_API_SECRET>`
