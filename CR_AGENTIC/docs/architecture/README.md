@@ -20,8 +20,10 @@ Endpoints:
 - `POST /internal/study-plan/events`
 - `POST /internal/study-plan/recompute`
 - `POST /internal/notifications`
+- `GET /universities/:id` — public university record. Onboarding reads boolean `isDemo` from it and ignores name and id.
+- `POST /internal/reviewer-demo/provision` — `{ userId, universityId }` for an `isDemo` university. Same `X-Internal-Secret` as import-from-agent. Nest serves it at `/api/internal/reviewer-demo/provision`.
 
-All require header: `X-Internal-Secret: <INTERNAL_API_SECRET>`
+Internal routes require header: `X-Internal-Secret: <INTERNAL_API_SECRET>`
 
 ## Standalone deployment & onboarding
 

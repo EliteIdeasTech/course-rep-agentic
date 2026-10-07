@@ -55,6 +55,20 @@ client should poll status endpoints and render UI based on the current `stage`.
 
 Response: `{ "onboardingSessionId": "uuid", "stage": "UNIVERSITY_SELECTED" }`
 
+When the main API university has `isDemo: true` (never matched by name or id), start
+skips portal discovery and returns:
+
+```json
+{ "onboardingSessionId": "uuid", "stage": "AWAITING_LOGIN", "demo": true }
+```
+
+`GET /onboarding/:sessionId` includes `"demo": true` for that session. Submit
+`POST /onboarding/:sessionId/login/credentials` with username `appreview` and the
+server-side review password. Success is
+`{ "status": "captured", "stage": "ONBOARDING_COMPLETE" }`. Wrong credentials are
+`401` with message `Invalid credentials`. `login/start` and `login-bridge` are
+rejected. The password is not stored and Playwright is not started.
+
 ### 2. Portal discovery
 
 - `POST /onboarding/:sessionId/discover-portal` → `{ "stage": "PORTAL_DISCOVERING" }`
@@ -211,7 +225,8 @@ Each course includes `selected` and `offered` (the same flag).
 ### Session status (any time)
 
 `GET /onboarding/:sessionId` returns the full status snapshot including `stage`,
-`selectedCandidateId`, `lastError`, `expiresAt`, and `isTerminal`.
+`selectedCandidateId`, `lastError`, `expiresAt`, `isTerminal`, and `demo`
+(`true` when the session was started for an `isDemo` university).
 
 `POST /onboarding/:sessionId/cancel` aborts an in-progress onboarding.
 

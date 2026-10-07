@@ -32,6 +32,12 @@ export const agentEnvSchema = z.object({
   // OPENAI_MODEL when unset.
   OPENAI_NAV_MODEL: z.preprocess(emptyToUndefined, z.string().optional()),
   PORTAL_SEARCH_API_KEY: z.string().optional(),
+  // App Review password for universities with isDemo=true. Username is
+  // `appreview`. Unset or blank rejects every demo credential attempt.
+  REVIEWER_PORTAL_PASSWORD: z.preprocess(
+    emptyToUndefined,
+    z.string().min(1).optional(),
+  ),
   PORTAL_SEARCH_ENDPOINT: z.string().default('https://google.serper.dev/search'),
   BROWSER_MAX_CONTEXTS: z.coerce.number().default(50),
   BROWSER_HEADLESS: z

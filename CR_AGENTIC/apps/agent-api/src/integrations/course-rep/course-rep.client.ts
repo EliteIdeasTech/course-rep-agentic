@@ -86,6 +86,37 @@ export class CourseRepClient {
     return this.request<CourseRepUser>(`/internal/users/${userId}`);
   }
 
+  /**
+   * Public university record. `isDemo` is the main API flag
+   * (`universities.isDemo`). Missing or non-boolean means not a demo school.
+   */
+  async getUniversity(universityId: string): Promise<{ isDemo?: boolean }> {
+    return this.request<{ isDemo?: boolean }>(
+      `/universities/${encodeURIComponent(universityId)}`,
+    );
+  }
+
+  /**
+   * Seeds the JWT user on a demo university. Same `X-Internal-Secret` header
+   * as import-from-agent. Full URL is `/api/internal/reviewer-demo/provision`
+   * when `COURSE_REP_API_URL` includes the Nest `/api` prefix.
+   */
+  async provisionReviewerDemo(payload: {
+    userId: string;
+    universityId: string;
+  }): Promise<{ courses?: Array<{
+    code?: string | null;
+    title?: string | null;
+    units?: number | null;
+    instructor?: string | null;
+    offered?: boolean;
+  }> }> {
+    return this.request('/internal/reviewer-demo/provision', {
+      method: 'POST',
+      body: JSON.stringify(payload),
+    });
+  }
+
   async importMaterial(payload: Record<string, unknown>): Promise<{ materialId: string }> {
     return this.request<{ materialId: string }>(
       '/internal/materials/import-from-agent',

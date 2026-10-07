@@ -30,6 +30,9 @@ const TRANSITIONS: Record<OnboardingStage, OnboardingStage[]> = {
   [OnboardingStage.AWAITING_LOGIN]: [
     OnboardingStage.LOGIN_IN_PROGRESS,
     OnboardingStage.REAUTH_REQUIRED,
+    // Reviewer demo sessions (university isDemo) finish here. They never
+    // open a portal or run Playwright.
+    OnboardingStage.ONBOARDING_COMPLETE,
     OnboardingStage.CANCELLED,
     OnboardingStage.FAILED,
   ],

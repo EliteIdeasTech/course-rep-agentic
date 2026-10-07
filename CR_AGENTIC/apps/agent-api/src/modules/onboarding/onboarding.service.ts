@@ -1,19 +1,30 @@
-import { Injectable, NotFoundException } from '@nestjs/common';
+import { Injectable, Logger, NotFoundException } from '@nestjs/common';
 import { randomUUID } from 'crypto';
 import { prisma, OnboardingStage, Prisma } from '@cr-agentic/database';
 import { writeAuditLog } from '@cr-agentic/observability';
 import { assertTransition, isTerminal } from './onboarding-state-machine';
 import { CourseRepClient } from '../../integrations/course-rep/course-rep.client';
 import { StartOnboardingRequestDto } from './dto/onboarding.request.dto';
+import {
+  demoSessionMetadata,
+  sessionIsDemo,
+  universityIsDemo as universityRecordIsDemo,
+} from './reviewer-demo';
 
 const ONBOARDING_TTL_MS = 24 * 60 * 60 * 1000;
 
 @Injectable()
 export class OnboardingService {
+  private readonly logger = new Logger(OnboardingService.name);
+
   constructor(private readonly courseRep: CourseRepClient) {}
 
   async start(userId: string, dto: StartOnboardingRequestDto) {
     await this.courseRep.getUser(userId);
+
+    if (await this.universityIsDemo(dto.universityId)) {
+      return this.startReviewerDemo(userId, dto);
+    }
 
     const session = await prisma.onboardingSession.create({
       data: {
@@ -42,6 +53,68 @@ export class OnboardingService {
     });
 
     return { onboardingSessionId: session.id, stage: session.stage };
+  }
+
+  /**
+   * Demo universities skip portal discovery. The session is already waiting
+   * for the fixed App Review credentials.
+   */
+  private async startReviewerDemo(userId: string, dto: StartOnboardingRequestDto) {
+    const session = await prisma.onboardingSession.create({
+      data: {
+        userId,
+        universityId: dto.universityId,
+        universityName: dto.universityName,
+        country: dto.country,
+        website: dto.website,
+        departmentName: dto.departmentName,
+        academicLevelName: dto.academicLevelName,
+        stage: 'AWAITING_LOGIN',
+        expiresAt: new Date(Date.now() + ONBOARDING_TTL_MS),
+        metadata: demoSessionMetadata() as Prisma.InputJsonValue,
+      },
+    });
+
+    await this.recordAudit(session.id, null, 'AWAITING_LOGIN', {
+      universityName: dto.universityName,
+      demo: true,
+    });
+
+    await writeAuditLog({
+      actorId: userId,
+      action: 'onboarding_started',
+      resourceType: 'onboarding_session',
+      resourceId: session.id,
+      metadata: {
+        universityId: dto.universityId,
+        universityName: dto.universityName,
+        demo: true,
+      },
+    });
+
+    return {
+      onboardingSessionId: session.id,
+      stage: 'AWAITING_LOGIN' as const,
+      demo: true as const,
+    };
+  }
+
+  /** Looks up `universities.isDemo`. Lookup failures stay on the normal path. */
+  private async universityIsDemo(universityId?: string): Promise<boolean> {
+    if (!universityId) return false;
+    try {
+      const university = await this.courseRep.getUniversity(universityId);
+      return universityRecordIsDemo(university);
+    } catch (err) {
+      const status =
+        err && typeof err === 'object' && 'status' in err
+          ? (err as { status?: number }).status
+          : undefined;
+      this.logger.warn(
+        `University ${universityId} isDemo lookup failed${status ? ` (${status})` : ''}; continuing without demo`,
+      );
+      return false;
+    }
   }
 
   /**
@@ -134,6 +207,7 @@ export class OnboardingService {
       expiresAt: session.expiresAt,
       completedAt: session.completedAt,
       isTerminal: isTerminal(session.stage),
+      demo: sessionIsDemo(session.metadata),
     };
   }
 
