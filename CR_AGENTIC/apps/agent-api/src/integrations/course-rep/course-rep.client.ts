@@ -4,6 +4,7 @@ import type {
   ImportCoursesFromAgentRequest,
   ImportCoursesFromAgentResponse,
 } from './import-courses.payload';
+import { unwrapCourseRepEnvelope } from '../../modules/onboarding/reviewer-demo';
 
 export interface CourseRepUser {
   id: string;
@@ -91,9 +92,10 @@ export class CourseRepClient {
    * (`universities.isDemo`). Missing or non-boolean means not a demo school.
    */
   async getUniversity(universityId: string): Promise<{ isDemo?: boolean }> {
-    return this.request<{ isDemo?: boolean }>(
+    const body = await this.request<unknown>(
       `/universities/${encodeURIComponent(universityId)}`,
     );
+    return unwrapCourseRepEnvelope<{ isDemo?: boolean }>(body);
   }
 
   /**
@@ -111,10 +113,11 @@ export class CourseRepClient {
     instructor?: string | null;
     offered?: boolean;
   }> }> {
-    return this.request('/internal/reviewer-demo/provision', {
+    const body = await this.request<unknown>('/internal/reviewer-demo/provision', {
       method: 'POST',
       body: JSON.stringify(payload),
     });
+    return unwrapCourseRepEnvelope(body);
   }
 
   async importMaterial(payload: Record<string, unknown>): Promise<{ materialId: string }> {

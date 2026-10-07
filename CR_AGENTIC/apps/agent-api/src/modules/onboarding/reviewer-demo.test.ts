@@ -10,6 +10,7 @@ import {
   sessionIsDemo,
   timingSafeStringEqual,
   universityIsDemo,
+  unwrapCourseRepEnvelope,
 } from './reviewer-demo';
 
 describe('universityIsDemo', () => {
@@ -142,5 +143,35 @@ describe('REVIEWER_DEMO_PROVISION_PATH', () => {
       `${base}${REVIEWER_DEMO_PROVISION_PATH}`,
       'https://api.courserep.ng/api/internal/reviewer-demo/provision',
     );
+  });
+});
+
+describe('unwrapCourseRepEnvelope', () => {
+  it('returns data from the main API envelope so isDemo is detected', () => {
+    const body = {
+      success: true,
+      message: 'Success',
+      data: { id: '52dda19f-870e-4ef5-9e92-4cb0d12643da', isDemo: true },
+    };
+    const university = unwrapCourseRepEnvelope<{ isDemo?: boolean }>(body);
+    assert.equal(universityIsDemo(university), true);
+    assert.equal(universityIsDemo(body), false);
+  });
+
+  it('unwraps the provision envelope so courses are imported', () => {
+    const provision = unwrapCourseRepEnvelope<{ courses?: Array<{ code: string; title: string }> }>({
+      success: true,
+      message: 'Success',
+      data: { courses: [{ code: 'CSC101', title: 'Intro' }] },
+    });
+    assert.equal(coursesToImportFromProvision('u1', provision)?.courses.length, 1);
+  });
+
+  it('passes through bodies without the envelope', () => {
+    const raw = { isDemo: true };
+    assert.equal(unwrapCourseRepEnvelope(raw), raw);
+    assert.equal(unwrapCourseRepEnvelope(null), null);
+    const list = [{ success: true, data: 1 }];
+    assert.equal(unwrapCourseRepEnvelope(list), list);
   });
 });
