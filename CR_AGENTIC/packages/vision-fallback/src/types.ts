@@ -8,7 +8,7 @@ export const PASSWORD_PLACEHOLDER = '{{CR_PORTAL_PASSWORD}}';
 export const CHALLENGE_ANSWER_PLACEHOLDER = '{{CR_CHALLENGE_ANSWER}}';
 
 /** Computer Use model from the Gemini Interactions API (browser environment). */
-export const COMPUTER_USE_MODEL = 'gemini-3.8-flash';
+export const COMPUTER_USE_MODEL = 'gemini-3.5-flash-lite';
 
 /** Gemini 3.x computer-use coordinates are normalized to this grid. */
 export const COORD_SCALE = 1000;
@@ -27,6 +27,15 @@ export const DEFAULT_VIEWPORT = { width: 1440, height: 900 };
 export const GEMINI_38_FLASH_USD_PER_MILLION = {
   input: 0.75,
   output: 3.75,
+} as const;
+
+/**
+ * Standard paid tier for gemini-3.5-flash-lite. The output price includes
+ * thinking tokens. https://ai.google.dev/gemini-api/docs/pricing
+ */
+export const GEMINI_35_FLASH_LITE_USD_PER_MILLION = {
+  input: 0.3,
+  output: 2.5,
 } as const;
 
 export type VisionGoal = 'login_and_extract' | 'extract' | 'find_login_form';
@@ -184,6 +193,8 @@ export interface ComputerUseClient {
   nextAction(input: {
     goalPrompt: string;
     screenshotPngBase64: string;
+    /** Prior shots included only when this request starts a new interaction. */
+    historyScreenshots?: string[];
     previousInteractionId?: string;
     functionResults?: FunctionResultInput[];
     htmlExcerpt?: string;

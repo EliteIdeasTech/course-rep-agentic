@@ -230,11 +230,12 @@ async function probePage(browser, url, label) {
 
 async function main() {
   const rate = await fxNgnPerUsd();
-  const ceilingInput = estimateUsd(200_000, 0);
-  const ceilingOutput = estimateUsd(0, 200_000);
+  const model = 'gemini-3.5-flash-lite';
+  const ceilingInput = estimateUsd(200_000, 0, model);
+  const ceilingOutput = estimateUsd(0, 200_000, model);
   console.log(JSON.stringify({
     run: 'budget-ceiling',
-    model: 'gemini-3.8-flash',
+    model,
     tokenBudget: 200_000,
     maxSteps: 25,
     timeoutMs: 180_000,
@@ -244,7 +245,7 @@ async function main() {
     ngnIfBudgetIsAllInput: rate ? estimateNgn(ceilingInput, rate) : null,
     ngnIfBudgetIsAllOutput: rate ? estimateNgn(ceilingOutput, rate) : null,
     geminiKeyPresent: hasKey(),
-    note: 'Ceiling uses published introductory rates through 31 Dec 2026: $0.75 / 1M input and $3.75 / 1M output. The loop stops when input+output tokens reach the budget.',
+    note: 'Default model gemini-3.5-flash-lite is $0.30 / 1M input and $2.50 / 1M output (output includes thinking tokens). gemini-3.8-flash is $0.75 / $3.75. The loop stops when input+output tokens reach the budget.',
   }));
 
   const rows = [];

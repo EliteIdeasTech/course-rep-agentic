@@ -1,12 +1,14 @@
 import assert from 'node:assert/strict';
 import { describe, it } from 'node:test';
 import {
+  challengeFromModelText,
   publishAndWaitForChallenge,
   readPendingChallenge,
   submitChallengeAnswer,
   visionChallengeKey,
   type ChallengeRedis,
 } from './challenge';
+import { buildGoalPrompt } from './prompt';
 import { pageChallenge } from './safety';
 import type { VisionChallenge } from './types';
 
@@ -16,6 +18,16 @@ describe('challenge answer gate', () => {
     assert.equal(pageChallenge('A verification code was sent to your phone')?.kind, 'otp');
     assert.equal(pageChallenge("Security question\nWhat is your mother's maiden name?")?.kind, 'security_question');
     assert.equal(pageChallenge('Course registration is closed')?.kind, undefined);
+  });
+
+  it('does not open a student pop-up for kind other or a navigation request', () => {
+    assert.equal(challengeFromModelText('USER_INPUT {"kind":"other","prompt":"Open the results menu"}'), null);
+    assert.equal(challengeFromModelText('USER_INPUT {not json'), null);
+    assert.equal(challengeFromModelText('USER_INPUT {"kind":"otp","prompt":"Enter the code"}')?.kind, 'otp');
+    const prompt = buildGoalPrompt('extract', 'https://portal.example.edu/home');
+    assert.equal(prompt.includes('"other"'), false);
+    assert.match(prompt, /Do not guess, invent, or type a URL/);
+    assert.match(prompt, /Do not ask the student to navigate/);
   });
 
   it('stores the answer for the executor and drops it from the public challenge', async () => {

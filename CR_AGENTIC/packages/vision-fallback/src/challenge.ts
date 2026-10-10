@@ -6,7 +6,7 @@ import {
   type VisionChallengeKind,
 } from './types';
 
-const KINDS = new Set<VisionChallengeKind>(['otp', 'captcha', 'security_question', 'other']);
+const STUDENT_KINDS = new Set<VisionChallengeKind>(['otp', 'captcha', 'security_question']);
 
 export function visionChallengeKey(sessionId: string): string {
   return `cr:agent:vision-challenge:${sessionId}`;
@@ -27,14 +27,16 @@ export function challengeFromModelText(text: string): { kind: VisionChallengeKin
   if (match) {
     try {
       const body = JSON.parse(match[1]) as { kind?: unknown; prompt?: unknown };
+      const kind = studentKind(body.kind);
+      if (!kind) return null;
       return {
-        kind: normalizeKind(body.kind),
+        kind,
         prompt: typeof body.prompt === 'string' && body.prompt.trim()
           ? body.prompt.trim().slice(0, 280)
-          : fallbackPrompt(normalizeKind(body.kind)),
+          : fallbackPrompt(kind),
       };
     } catch {
-      return { kind: 'other', prompt: fallbackPrompt('other') };
+      return null;
     }
   }
   if (/CAPTCHA_REQUIRED/i.test(text)) return { kind: 'captcha', prompt: fallbackPrompt('captcha') };
@@ -157,9 +159,14 @@ export async function readPendingChallenge(
       await redis.del(visionChallengeKey(sessionId));
       return null;
     }
+    const kind = studentKind(challenge.kind);
+    if (!kind) {
+      await redis.del(visionChallengeKey(sessionId));
+      return null;
+    }
     return {
       id: challenge.id,
-      kind: normalizeKind(challenge.kind),
+      kind,
       prompt: String(challenge.prompt ?? '').slice(0, 280),
       ...(challenge.imagePngBase64 ? { imagePngBase64: challenge.imagePngBase64 } : {}),
       expiresAt: challenge.expiresAt,
@@ -169,10 +176,10 @@ export async function readPendingChallenge(
   }
 }
 
-function normalizeKind(value: unknown): VisionChallengeKind {
-  return typeof value === 'string' && KINDS.has(value as VisionChallengeKind)
+function studentKind(value: unknown): VisionChallengeKind | null {
+  return typeof value === 'string' && STUDENT_KINDS.has(value as VisionChallengeKind)
     ? (value as VisionChallengeKind)
-    : 'other';
+    : null;
 }
 
 function fallbackPrompt(kind: VisionChallengeKind): string {

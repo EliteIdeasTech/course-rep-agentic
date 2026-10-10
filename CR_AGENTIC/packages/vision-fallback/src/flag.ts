@@ -1,3 +1,5 @@
+import { COMPUTER_USE_MODEL } from './types';
+
 /**
  * Env flag defaults off. Session metadata `visionFallbackEnabled` overrides it
  * for a single onboarding session. Demo sessions never enable it: they have no
@@ -33,7 +35,7 @@ export function resolveGeminiApiKey(env: {
 
 export function visionModelFromEnv(env: { VISION_FALLBACK_MODEL?: string }): string {
   const model = env.VISION_FALLBACK_MODEL?.trim();
-  return model || 'gemini-3.8-flash';
+  return model || COMPUTER_USE_MODEL;
 }
 
 function isDemoMetadata(metadata: unknown): boolean {

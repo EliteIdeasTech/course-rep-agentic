@@ -22,6 +22,9 @@ import {
   type VisionStepLog,
 } from './types';
 
+/** Each follow-up re-bills every prior image, so the chain is restarted after this many. */
+const MAX_SCREENSHOTS = 3;
+
 export interface VisionLoopInput {
   surface: ComputerSurface;
   client: ComputerUseClient;
@@ -38,6 +41,8 @@ export interface VisionLoopInput {
    * returns AWAITING_USER_INPUT with the challenge payload.
    */
   awaitUserInput?: (challenge: VisionChallenge) => Promise<ChallengeWaitResult>;
+  /** Model id used to price the run. Defaults to flash-lite rates when omitted. */
+  model?: string;
 }
 
 export async function runVisionLoop(input: VisionLoopInput): Promise<VisionRunResult> {
@@ -55,6 +60,7 @@ export async function runVisionLoop(input: VisionLoopInput): Promise<VisionRunRe
   const goalPrompt = buildGoalPrompt(input.goal, input.portalUrl, input.username);
   let previousInteractionId: string | undefined;
   let functionResults: FunctionResultInput[] | undefined;
+  let imagesOnInteraction = 0;
   let status: VisionStatus = 'FAILED';
   let stopReason: string | undefined;
   let capture = emptyCapture();
@@ -82,7 +88,7 @@ export async function runVisionLoop(input: VisionLoopInput): Promise<VisionRunRe
       steps: state.steps,
       inputTokens: state.inputTokens,
       outputTokens: state.outputTokens,
-      estimatedUsd: estimateUsd(state.inputTokens, state.outputTokens),
+      estimatedUsd: estimateUsd(state.inputTokens, state.outputTokens, input.model),
       latencyMs: Math.max(0, now() - startedAt),
       logs,
       stopReason,
@@ -135,19 +141,30 @@ export async function runVisionLoop(input: VisionLoopInput): Promise<VisionRunRe
       const shot = await input.surface.screenshot();
       const screenshotPngBase64 = shot.toString('base64');
       screenshots.push(screenshotPngBase64);
-      if (screenshots.length > 4) screenshots.shift();
-      const htmlExcerpt = redactSecrets(await input.surface.htmlExcerpt(12_000), secrets);
+      trimScreenshots(screenshots);
+      const htmlExcerpt = redactSecrets(await input.surface.htmlExcerpt(4_000), secrets);
+
+      let continuePrevious = Boolean(previousInteractionId && functionResults && functionResults.length > 0);
+      if (continuePrevious && imagesOnInteraction >= MAX_SCREENSHOTS) {
+        previousInteractionId = undefined;
+        functionResults = undefined;
+        continuePrevious = false;
+      }
 
       const turn = await input.client.nextAction({
         goalPrompt,
         screenshotPngBase64,
-        previousInteractionId,
-        functionResults,
+        historyScreenshots: continuePrevious ? undefined : screenshots.slice(-MAX_SCREENSHOTS),
+        previousInteractionId: continuePrevious ? previousInteractionId : undefined,
+        functionResults: continuePrevious ? functionResults : undefined,
         htmlExcerpt,
       });
       state.inputTokens += turn.inputTokens;
       state.outputTokens += turn.outputTokens;
-      previousInteractionId = turn.id ?? previousInteractionId;
+      imagesOnInteraction = continuePrevious
+        ? imagesOnInteraction + (functionResults?.length ?? 0)
+        : screenshots.length;
+      previousInteractionId = turn.id ?? (continuePrevious ? previousInteractionId : undefined);
       if (state.inputTokens + state.outputTokens >= input.limits.tokenBudget) {
         return finish('BUDGET_EXCEEDED', 'token budget', true);
       }
@@ -206,7 +223,7 @@ export async function runVisionLoop(input: VisionLoopInput): Promise<VisionRunRe
         }
         const afterShot = (await input.surface.screenshot()).toString('base64');
         screenshots.push(afterShot);
-        if (screenshots.length > 4) screenshots.shift();
+        trimScreenshots(screenshots);
         results.push({
           name: call.name,
           callId: call.id,
@@ -247,6 +264,10 @@ async function extractBestEffort(
   } catch {
     return { capture: emptyCapture(), inputTokens: 0, outputTokens: 0 };
   }
+}
+
+function trimScreenshots(screenshots: string[]): void {
+  while (screenshots.length > MAX_SCREENSHOTS) screenshots.shift();
 }
 
 function hasCapture(capture: VisionCapture): boolean {

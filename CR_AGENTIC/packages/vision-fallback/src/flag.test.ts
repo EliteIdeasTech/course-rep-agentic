@@ -1,6 +1,6 @@
 import assert from 'node:assert/strict';
 import { describe, it } from 'node:test';
-import { resolveGeminiApiKey, visionFallbackEnabled } from './flag';
+import { resolveGeminiApiKey, visionFallbackEnabled, visionModelFromEnv } from './flag';
 import { estimateNgn, estimateUsd } from './cost';
 
 describe('vision fallback flag', () => {
@@ -26,8 +26,13 @@ describe('vision fallback flag', () => {
     assert.equal(resolveGeminiApiKey({ OPENAI_API_KEY: 'sk-openai' }), undefined);
   });
 
-  it('prices gemini-3.8-flash at the published introductory rates', () => {
-    assert.equal(estimateUsd(1_000_000, 1_000_000), 4.5);
+  it('prices each computer-use model and defaults to flash-lite', () => {
+    assert.equal(visionModelFromEnv({}), 'gemini-3.5-flash-lite');
+    assert.equal(visionModelFromEnv({ VISION_FALLBACK_MODEL: '  gemini-3.8-flash  ' }), 'gemini-3.8-flash');
+    assert.equal(estimateUsd(1_000_000, 1_000_000, 'gemini-3.8-flash'), 4.5);
+    assert.equal(estimateUsd(1_000_000, 1_000_000, 'gemini-3.5-flash-lite'), 2.8);
+    assert.equal(estimateUsd(1_000_000, 1_000_000), 2.8);
+    assert.equal(estimateUsd(1_000_000, 1_000_000, 'gemini-3.8-pro'), 4.5);
     assert.equal(estimateNgn(1, 1600), 1600);
   });
 });

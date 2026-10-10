@@ -2,45 +2,88 @@ import { EXTRACTION_PROMPT, parseVisionCapture } from './extract';
 import type { ComputerUseClient, FunctionResultInput, ModelFunctionCall, ModelTurn, VisionCapture } from './types';
 
 const INTERACTIONS_URL = 'https://generativelanguage.googleapis.com/v1beta/interactions';
+const DEFAULT_RETRY_DELAYS_MS = [1000, 2000, 4000];
+
+const COMPUTER_USE_TOOL = {
+  type: 'computer_use',
+  environment: 'browser',
+  enable_prompt_injection_detection: true,
+};
+
+export interface ComputerUseRequestInput {
+  goalPrompt: string;
+  screenshotPngBase64: string;
+  historyScreenshots?: string[];
+  previousInteractionId?: string;
+  functionResults?: FunctionResultInput[];
+  htmlExcerpt?: string;
+}
+
+export interface GeminiClientOptions {
+  fetchImpl?: typeof fetch;
+  retryDelaysMs?: number[];
+  sleep?: (ms: number) => Promise<void>;
+}
+
+/**
+ * `tools` is only valid on the first turn of an interaction. Sending it again
+ * with `previous_interaction_id` makes the API return 400 "safety violations".
+ * A restarted interaction (no previous id) is a first turn and does include tools.
+ */
+export function buildComputerUseRequest(model: string, input: ComputerUseRequestInput): Record<string, unknown> {
+  const followUp = Boolean(input.previousInteractionId && input.functionResults && input.functionResults.length > 0);
+  const body: Record<string, unknown> = { model };
+  if (followUp) {
+    body.previous_interaction_id = input.previousInteractionId;
+    body.input = input.functionResults!.map((result) => ({
+      type: 'function_result',
+      name: result.name,
+      call_id: result.callId,
+      result: [
+        { type: 'text', text: JSON.stringify({ url: result.url, ...(result.error ? { error: result.error } : {}) }) },
+        { type: 'image', data: result.screenshotPngBase64, mime_type: 'image/png' },
+      ],
+    }));
+    return body;
+  }
+  body.tools = [COMPUTER_USE_TOOL];
+  const shots = input.historyScreenshots && input.historyScreenshots.length > 0
+    ? input.historyScreenshots.slice(-3)
+    : [input.screenshotPngBase64];
+  const inputParts: unknown[] = [{ type: 'text', text: input.goalPrompt }];
+  for (const data of shots) {
+    inputParts.push({ type: 'image', data, mime_type: 'image/png' });
+  }
+  if (input.htmlExcerpt) {
+    inputParts.push({ type: 'text', text: `Visible page text:\n${input.htmlExcerpt.slice(0, 4000)}` });
+  }
+  body.input = inputParts;
+  return body;
+}
 
 export class GeminiComputerUseClient implements ComputerUseClient {
+  private readonly fetchImpl: typeof fetch;
+  private readonly retryDelaysMs: number[];
+  private readonly sleep: (ms: number) => Promise<void>;
+
   constructor(
     private readonly apiKey: string,
     private readonly model: string,
-    private readonly fetchImpl: typeof fetch = fetch,
-  ) {}
-
-  async nextAction(input: {
-    goalPrompt: string;
-    screenshotPngBase64: string;
-    previousInteractionId?: string;
-    functionResults?: FunctionResultInput[];
-    htmlExcerpt?: string;
-  }): Promise<ModelTurn> {
-    const tools = [{ type: 'computer_use', environment: 'browser', enable_prompt_injection_detection: true }];
-    const body: Record<string, unknown> = { model: this.model, tools };
-    if (input.previousInteractionId && input.functionResults && input.functionResults.length > 0) {
-      body.previous_interaction_id = input.previousInteractionId;
-      body.input = input.functionResults.map((result) => ({
-        type: 'function_result',
-        name: result.name,
-        call_id: result.callId,
-        result: [
-          { type: 'text', text: JSON.stringify({ url: result.url, ...(result.error ? { error: result.error } : {}) }) },
-          { type: 'image', data: result.screenshotPngBase64, mime_type: 'image/png' },
-        ],
-      }));
+    fetchImplOrOptions: typeof fetch | GeminiClientOptions = fetch,
+  ) {
+    if (typeof fetchImplOrOptions === 'function') {
+      this.fetchImpl = fetchImplOrOptions;
+      this.retryDelaysMs = DEFAULT_RETRY_DELAYS_MS;
+      this.sleep = (ms) => new Promise((resolve) => setTimeout(resolve, ms));
     } else {
-      const inputParts: unknown[] = [
-        { type: 'text', text: input.goalPrompt },
-        { type: 'image', data: input.screenshotPngBase64, mime_type: 'image/png' },
-      ];
-      if (input.htmlExcerpt) {
-        inputParts.push({ type: 'text', text: `Visible HTML excerpt:\n${input.htmlExcerpt.slice(0, 4000)}` });
-      }
-      body.input = inputParts;
+      this.fetchImpl = fetchImplOrOptions.fetchImpl ?? fetch;
+      this.retryDelaysMs = fetchImplOrOptions.retryDelaysMs ?? DEFAULT_RETRY_DELAYS_MS;
+      this.sleep = fetchImplOrOptions.sleep ?? ((ms) => new Promise((resolve) => setTimeout(resolve, ms)));
     }
-    return parseModelTurn(await this.post(INTERACTIONS_URL, body));
+  }
+
+  async nextAction(input: ComputerUseRequestInput): Promise<ModelTurn> {
+    return parseModelTurn(await this.post(INTERACTIONS_URL, buildComputerUseRequest(this.model, input)));
   }
 
   async extract(input: {
@@ -52,7 +95,7 @@ export class GeminiComputerUseClient implements ComputerUseClient {
     for (const data of input.screenshots) {
       parts.push({ inline_data: { mime_type: 'image/png', data } });
     }
-    parts.push({ text: input.htmlExcerpt.slice(0, 12_000) });
+    parts.push({ text: `Visible page text:\n${input.htmlExcerpt.slice(0, 12_000)}` });
     const json = await this.post(url, {
       contents: [{ role: 'user', parts }],
       generationConfig: { responseMimeType: 'application/json' },
@@ -73,19 +116,27 @@ export class GeminiComputerUseClient implements ComputerUseClient {
   }
 
   private async post(url: string, body: unknown): Promise<unknown> {
-    const response = await this.fetchImpl(url, {
-      method: 'POST',
-      headers: {
-        'Content-Type': 'application/json',
-        'x-goog-api-key': this.apiKey,
-      },
-      body: JSON.stringify(body),
-    });
-    const text = await response.text();
-    if (!response.ok) {
-      throw new Error(`Gemini ${response.status}: ${text.slice(0, 300)}`);
+    const attempts = this.retryDelaysMs.length + 1;
+    let lastStatus = 0;
+    let lastText = '';
+    for (let attempt = 0; attempt < attempts; attempt++) {
+      const response = await this.fetchImpl(url, {
+        method: 'POST',
+        headers: {
+          'Content-Type': 'application/json',
+          'x-goog-api-key': this.apiKey,
+        },
+        body: JSON.stringify(body),
+      });
+      const text = await response.text();
+      if (response.ok) return text ? JSON.parse(text) : {};
+      lastStatus = response.status;
+      lastText = text;
+      const retryable = response.status === 503 || response.status === 429;
+      if (!retryable || attempt === attempts - 1) break;
+      await this.sleep(this.retryDelaysMs[attempt] ?? DEFAULT_RETRY_DELAYS_MS[attempt] ?? 1000);
     }
-    return text ? JSON.parse(text) : {};
+    throw new Error(`Gemini ${lastStatus}: ${lastText.slice(0, 300)}`);
   }
 }
 
@@ -163,7 +214,14 @@ export function readUsage(body: unknown): { inputTokens: number; outputTokens: n
     'candidatesTokenCount',
     'total_output_tokens',
   ]);
-  return { inputTokens: input, outputTokens: output };
+  // Thinking tokens are billed at the output rate and are not included in output_tokens.
+  const thoughts = firstNumber(usage, [
+    'total_thought_tokens',
+    'thoughts_token_count',
+    'thoughtsTokenCount',
+    'totalThoughtTokens',
+  ]);
+  return { inputTokens: input, outputTokens: output + thoughts };
 }
 
 function firstNumber(source: Record<string, unknown>, keys: string[]): number {

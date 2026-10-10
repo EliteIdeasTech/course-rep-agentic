@@ -5,6 +5,7 @@ export {
   DEFAULT_TIMEOUT_MS,
   DEFAULT_TOKEN_BUDGET,
   DEFAULT_VIEWPORT,
+  GEMINI_35_FLASH_LITE_USD_PER_MILLION,
   GEMINI_38_FLASH_USD_PER_MILLION,
   CHALLENGE_ANSWER_PLACEHOLDER,
   DEFAULT_CHALLENGE_TIMEOUT_MS,
@@ -54,7 +55,7 @@ export { runVisionLoop } from './loop';
 export { runPortalVisionFallback } from './run';
 export { buildGoalPrompt } from './prompt';
 export { parseVisionCapture } from './extract';
-export { GeminiComputerUseClient, parseModelTurn, readUsage } from './gemini';
+export { GeminiComputerUseClient, buildComputerUseRequest, parseModelTurn, readUsage } from './gemini';
 export { playwrightSurface } from './playwright-surface';
 export type { PlaywrightLikePage } from './playwright-surface';
 export { saveVisionCapture } from './persist';

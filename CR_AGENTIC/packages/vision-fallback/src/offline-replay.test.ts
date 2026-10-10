@@ -147,4 +147,63 @@ describe('offline recorded screenshot replay', () => {
     assert.equal(capped.status, 'BUDGET_EXCEEDED');
     assert.ok(capped.steps <= 3);
   });
+
+  it('drops previous_interaction_id once three screenshots are already on the interaction', async () => {
+    const seen: Array<{ previous?: string; history?: number }> = [];
+    let n = 0;
+    const surface: ComputerSurface = {
+      viewport: () => ({ width: 800, height: 600 }),
+      url: () => 'https://portal.example.edu/home',
+      screenshot: async () => Buffer.from(`shot-${n}`),
+      htmlExcerpt: async () => 'Results page',
+      elementAt: async () => null,
+      passwordFieldVisible: async () => false,
+      loginFormVisible: async () => false,
+      challengeVisible: async () => null,
+      click: async () => undefined,
+      move: async () => undefined,
+      typeText: async () => undefined,
+      scroll: async () => undefined,
+      navigate: async () => undefined,
+      goBack: async () => undefined,
+      goForward: async () => undefined,
+      wait: async () => undefined,
+      pressKey: async () => undefined,
+    };
+    const client: ComputerUseClient = {
+      async nextAction(input) {
+        n += 1;
+        seen.push({
+          previous: input.previousInteractionId,
+          history: input.historyScreenshots?.length,
+        });
+        if (n >= 4) return { id: `t${n}`, calls: [], text: 'DONE', inputTokens: 1, outputTokens: 1 };
+        return {
+          id: `t${n}`,
+          calls: [{ id: `c${n}`, name: 'wait', arguments: { seconds: 0 } }],
+          text: '',
+          inputTokens: 1,
+          outputTokens: 1,
+        };
+      },
+      async extract() {
+        return { capture: { profile: {}, courses: [] }, inputTokens: 0, outputTokens: 0 };
+      },
+    };
+    await runVisionLoop({
+      surface,
+      client,
+      goal: 'extract',
+      portalUrl: 'https://portal.example.edu/home',
+      limits: { maxSteps: 10, timeoutMs: 10_000, tokenBudget: 10_000 },
+      now: () => 0,
+      model: 'gemini-3.5-flash-lite',
+    });
+    assert.equal(seen[0]?.previous, undefined);
+    assert.equal(seen[1]?.previous, 't1');
+    assert.equal(seen[2]?.previous, 't2');
+    assert.equal(seen[3]?.previous, undefined);
+    assert.equal(seen[3]?.history, 3);
+    assert.equal(seen[0]?.history, 1);
+  });
 });

@@ -45,7 +45,8 @@ export async function runPortalVisionFallback(input: {
     };
   }
   const surface = await playwrightSurface(input.page);
-  const client = new GeminiComputerUseClient(apiKey, visionModelFromEnv(input.env));
+  const model = visionModelFromEnv(input.env);
+  const client = new GeminiComputerUseClient(apiKey, model);
   return runVisionLoop({
     surface,
     client,
@@ -57,5 +58,6 @@ export async function runPortalVisionFallback(input: {
     challengeTimeoutMs: challengeTimeoutFromEnv(input.env),
     onStep: input.onStep,
     awaitUserInput: input.awaitUserInput,
+    model,
   });
 }

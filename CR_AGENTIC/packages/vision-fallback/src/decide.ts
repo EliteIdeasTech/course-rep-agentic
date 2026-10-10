@@ -99,12 +99,7 @@ export function decideAction(call: ModelFunctionCall, ctx: DecideContext): Actio
     let didSubstitute = substituted.substituted;
     if (text.includes(CHALLENGE_ANSWER_PLACEHOLDER)) {
       if (!challengeAnswer) {
-        return {
-          kind: 'pause',
-          challengeKind: 'other',
-          prompt: 'Enter the requested code.',
-          intent,
-        };
+        return { kind: 'refuse', reason: 'challenge answer is not available yet', intent };
       }
       text = text.split(CHALLENGE_ANSWER_PLACEHOLDER).join(challengeAnswer);
       didSubstitute = true;

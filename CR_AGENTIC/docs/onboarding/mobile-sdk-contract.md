@@ -193,7 +193,7 @@ When credential login cannot finish by itself, the vision fallback may pause ins
 }
 ```
 
-`kind` is `otp`, `captcha`, `security_question`, or `other`. `prompt` is the text for the pop-up. `imagePngBase64` is set when the page has a captcha image or code widget; decode it and show it above the input. It is omitted when there is nothing to crop.
+`kind` is `otp`, `captcha`, or `security_question`. `prompt` is the text for the pop-up. `imagePngBase64` is set when the page has a captcha image or code widget; decode it and show it above the input. It is omitted when there is nothing to crop. The server does not pause for any other kind.
 
 Show a modal with the prompt, the image when present, and a single text field. Do not send the screenshot or the answer to any other service. The server does not solve captchas.
 

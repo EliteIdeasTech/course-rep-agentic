@@ -4,9 +4,11 @@ export function buildGoalPrompt(goal: VisionGoal, portalUrl: string, username?: 
   const shared = [
     'You are looking at one student portal in a browser. Stay school-agnostic: do not assume a vendor or a campus.',
     `Stay on the registrable domain of ${portalUrl}. Do not open any other site.`,
+    'Do not guess, invent, or type a URL. Only open a link that is visible on the current page.',
     'Do not click Pay, payment, checkout, Register courses, course registration, Delete, or any Submit button that is not the login button.',
-    'If you see a captcha, one-time code, 2FA prompt, security question, or any other code or input you were not given, do not solve it, do not guess, and do not use a captcha service.',
-    'Reply with one line: USER_INPUT {"kind":"otp"|"captcha"|"security_question"|"other","prompt":"short instruction for the student"}.',
+    'If you see a captcha, one-time code, 2FA prompt, or security question, do not solve it, do not guess, and do not use a captcha service.',
+    'Reply with one line: USER_INPUT {"kind":"otp"|"captcha"|"security_question","prompt":"short instruction for the student"}.',
+    'Do not ask the student to navigate, pick a menu, or find a page. Only pause for an OTP, captcha, or security question.',
     'After the student answers, the browser types it. You will not see the answer.',
   ];
   const challengeType = `If you must type into that field, type exactly ${CHALLENGE_ANSWER_PLACEHOLDER} and nothing else.`;

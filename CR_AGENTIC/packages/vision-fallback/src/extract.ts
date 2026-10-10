@@ -1,7 +1,7 @@
 import type { VisionCapture, VisionCourse, VisionProfile, VisionResults } from './types';
 
 export const EXTRACTION_PROMPT = [
-  'Extract the student portal data visible in the screenshots and HTML.',
+  'Extract the student portal data visible in the screenshots and visible page text.',
   'Return JSON only. Do not invent fields that are not on the page.',
   'profile.studentId is the matric or registration number.',
   'courses are registered course units (code, title, units), not the programme name.',

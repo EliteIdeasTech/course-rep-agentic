@@ -77,6 +77,24 @@ describe('action executor', () => {
       ctx({ element: { text: 'Sign in', ariaLabel: '', href: '', tag: 'button', inputType: 'submit', role: '' } }),
     );
     assert.equal(login.kind, 'execute');
+
+    const loginOutsideForm = decideAction(
+      { id: '7', name: 'click', arguments: { x: 10, y: 10, intent: 'Click Login' } },
+      ctx({
+        passwordVisible: false,
+        element: { text: 'Login', ariaLabel: '', href: '', tag: 'button', inputType: 'submit', role: '' },
+      }),
+    );
+    assert.equal(loginOutsideForm.kind, 'execute');
+
+    const submitWithoutPassword = decideAction(
+      { id: '8', name: 'click', arguments: { x: 1, y: 1, intent: 'Submit assignment' } },
+      ctx({
+        passwordVisible: false,
+        element: { text: 'Submit', ariaLabel: '', href: '', tag: 'button', inputType: 'submit', role: '' },
+      }),
+    );
+    assert.equal(submitWithoutPassword.kind, 'refuse');
   });
 
   it('pauses on captcha and OTP instead of solving them, and refuses navigation off the portal domain', () => {

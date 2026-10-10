@@ -53,7 +53,7 @@ export function classifyAction(ctx: SafetyContext): SafetyVerdict {
   if (REGISTER.test(blob)) return { ok: false, reason: 'refused course registration action' };
   if (DELETE.test(blob)) return { ok: false, reason: 'refused delete action' };
 
-  const loginSubmit = ctx.passwordVisible && LOGIN.test(blob);
+  const loginSubmit = LOGIN.test(blob);
   if (SUBMIT.test(blob) && !loginSubmit) {
     return { ok: false, reason: 'refused submit outside login' };
   }

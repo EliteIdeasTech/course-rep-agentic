@@ -41,7 +41,10 @@ export async function playwrightSurface(page: PlaywrightLikePage): Promise<Compu
     viewport: () => page.viewportSize() ?? DEFAULT_VIEWPORT,
     url: () => page.url(),
     screenshot: () => screenshotMasked(page, secrets),
-    htmlExcerpt: async (maxChars) => (await page.content()).slice(0, maxChars),
+    htmlExcerpt: async (maxChars) => {
+      const text = await page.evaluate(() => document.body?.innerText ?? '');
+      return text.slice(0, maxChars);
+    },
     elementAt: (x, y) =>
       page.evaluate((point) => {
         const el = document.elementFromPoint(point.x, point.y) as HTMLElement | null;
@@ -67,8 +70,7 @@ export async function playwrightSurface(page: PlaywrightLikePage): Promise<Compu
       }),
     challengeVisible: async () => {
       const text = await page.evaluate(() => document.body?.innerText?.slice(0, 4000) ?? '');
-      const html = await page.content();
-      return pageChallenge(`${text}\n${html.slice(0, 4000)}`);
+      return pageChallenge(text);
     },
     cropChallenge: () => cropChallenge(page),
     focusChallenge: (kind) => focusChallenge(page, kind),
@@ -76,6 +78,9 @@ export async function playwrightSurface(page: PlaywrightLikePage): Promise<Compu
       if (value) secrets.add(value);
     },
     click: async (x, y, button = 'left', clickCount = 1) => {
+      await page.evaluate(() => {
+        document.querySelectorAll('a[target], form[target]').forEach((el) => el.removeAttribute('target'));
+      }).catch(() => undefined);
       if (clickCount === 2) {
         await page.mouse.dblclick(x, y);
         return;

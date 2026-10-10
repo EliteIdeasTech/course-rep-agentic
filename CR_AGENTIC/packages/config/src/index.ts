@@ -49,7 +49,7 @@ export const agentEnvSchema = z.object({
   ),
   VISION_FALLBACK_MODEL: z.preprocess(
     emptyToUndefined,
-    z.string().min(1).default('gemini-3.8-flash'),
+    z.string().min(1).default('gemini-3.5-flash-lite'),
   ),
   VISION_FALLBACK_MAX_STEPS: z.coerce.number().default(25),
   VISION_FALLBACK_TIMEOUT_MS: z.coerce.number().default(180_000),
