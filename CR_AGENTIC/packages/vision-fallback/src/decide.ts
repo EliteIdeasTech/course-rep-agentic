@@ -1,7 +1,7 @@
-import { COORD_SCALE, type ElementSnapshot, type ModelFunctionCall } from './types';
+import { COORD_SCALE, type ElementSnapshot, type ModelFunctionCall, type VisionChallengeKind } from './types';
 import { isNavigationAllowed } from './domain';
 import { classifyAction } from './safety';
-import { PASSWORD_PLACEHOLDER } from './types';
+import { CHALLENGE_ANSWER_PLACEHOLDER, PASSWORD_PLACEHOLDER } from './types';
 import { substitutePassword } from './password';
 
 export type PlannedAction =
@@ -19,13 +19,16 @@ export type PlannedAction =
 export type ActionPlan =
   | { kind: 'execute'; action: PlannedAction; intent?: string }
   | { kind: 'refuse'; reason: string; intent?: string }
-  | { kind: 'stop'; status: 'CAPTCHA_REQUIRED' | 'OTP_REQUIRED' | 'BLOCKED'; reason: string };
+  | { kind: 'pause'; challengeKind: VisionChallengeKind; prompt: string; intent?: string }
+  | { kind: 'stop'; status: 'BLOCKED'; reason: string };
 
 export interface DecideContext {
   portalUrl: string;
   currentUrl: string;
   viewport: { width: number; height: number };
   password: string;
+  /** Latest student reply, kept only in this process. */
+  challengeAnswer?: string;
   allowTyping: boolean;
   passwordVisible: boolean;
   element: ElementSnapshot | null;
@@ -49,8 +52,11 @@ export function decideAction(call: ModelFunctionCall, ctx: DecideContext): Actio
     passwordVisible: ctx.passwordVisible,
     allowTyping: ctx.allowTyping,
   });
+  if (!verdict.ok && 'pause' in verdict) {
+    return { kind: 'pause', challengeKind: verdict.pause, prompt: verdict.prompt, intent };
+  }
   if (!verdict.ok && 'stop' in verdict) {
-    return { kind: 'stop', status: verdict.stop, reason: verdict.stop };
+    return { kind: 'stop', status: 'BLOCKED', reason: verdict.stop };
   }
   if (!verdict.ok && 'reason' in verdict) {
     return { kind: 'refuse', reason: verdict.reason, intent };
@@ -88,13 +94,31 @@ export function decideAction(call: ModelFunctionCall, ctx: DecideContext): Actio
     if (raw.includes(PASSWORD_PLACEHOLDER) && !ctx.password) {
       return { kind: 'refuse', reason: 'password placeholder present but no local password', intent };
     }
+    const challengeAnswer = ctx.challengeAnswer ?? '';
+    let text = substituted.text;
+    let didSubstitute = substituted.substituted;
+    if (text.includes(CHALLENGE_ANSWER_PLACEHOLDER)) {
+      if (!challengeAnswer) {
+        return {
+          kind: 'pause',
+          challengeKind: 'other',
+          prompt: 'Enter the requested code.',
+          intent,
+        };
+      }
+      text = text.split(CHALLENGE_ANSWER_PLACEHOLDER).join(challengeAnswer);
+      didSubstitute = true;
+    }
+    if (challengeAnswer && raw.includes(challengeAnswer)) {
+      return { kind: 'refuse', reason: 'refused to type a challenge answer from the model', intent };
+    }
     return {
       kind: 'execute',
       action: {
         kind: 'type',
-        text: substituted.text,
+        text,
         pressEnter: args.press_enter === true,
-        substituted: substituted.substituted,
+        substituted: didSubstitute,
       },
       intent,
     };

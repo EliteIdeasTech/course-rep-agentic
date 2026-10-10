@@ -17,6 +17,11 @@ import {
   LoginBridgeRequestDto,
   CredentialLoginRequestDto,
 } from './dto/onboarding.request.dto';
+import { loadChallengeView } from './challenge-view';
+import {
+  submitChallengeAnswer,
+  type ChallengeRedis,
+} from '@cr-agentic/vision-fallback';
 import {
   createBridgeToken,
   verifyBridgeToken,
@@ -89,11 +94,71 @@ export class LoginService {
     };
   }
 
-  status(userId: string, sessionId: string) {
-    return this.onboarding.requireSession(userId, sessionId).then((session) => ({
+  async status(userId: string, sessionId: string) {
+    const session = await this.onboarding.requireSession(userId, sessionId);
+    const challengeView = await loadChallengeView(
+      this.redis as unknown as ChallengeRedis,
+      sessionId,
+      session.expiresAt,
+    );
+    if (challengeView.visionStatus === 'AWAITING_USER_INPUT') {
+      return {
+        status: 'awaiting_user_input' as const,
+        visionStatus: challengeView.visionStatus,
+        stage: session.stage,
+        challenge: challengeView.challenge,
+      };
+    }
+    if (challengeView.visionStatus === 'SESSION_EXPIRED') {
+      return {
+        status: 'failed' as const,
+        visionStatus: challengeView.visionStatus,
+        stage: session.stage,
+        challenge: null,
+      };
+    }
+    return {
       status: this.mapStatus(session.stage),
+      visionStatus: null,
       stage: session.stage,
-    }));
+      challenge: null,
+    };
+  }
+
+  /**
+   * Student reply for a paused vision challenge. The answer is written to Redis
+   * for the browser worker and is not returned, logged, or sent to the model.
+   */
+  async submitChallenge(userId: string, sessionId: string, answer: string) {
+    const session = await this.onboarding.requireSession(userId, sessionId);
+    if (sessionIsDemo(session.metadata)) {
+      throw new BadRequestException('Demo sessions do not use portal challenges');
+    }
+    let reply = answer;
+    const outcome = await submitChallengeAnswer(
+      this.redis as unknown as ChallengeRedis,
+      sessionId,
+      reply,
+      { now: Date.now(), sessionExpiresAt: session.expiresAt.getTime() },
+    );
+    reply = '';
+    if (!outcome.ok && outcome.reason === 'SESSION_EXPIRED') {
+      throw new HttpException('SESSION_EXPIRED', HttpStatus.GONE);
+    }
+    if (!outcome.ok && outcome.reason === 'EXPIRED') {
+      throw new HttpException('CHALLENGE_TIMEOUT', HttpStatus.GONE);
+    }
+    if (!outcome.ok) {
+      throw new BadRequestException('No challenge is waiting for input');
+    }
+    await writeAuditLog({
+      actorId: userId,
+      action: 'vision_challenge_answer_submitted',
+      resourceType: 'onboarding_session',
+      resourceId: sessionId,
+      metadata: { challengeId: outcome.challengeId, kind: outcome.kind },
+    });
+    return { status: 'accepted' as const, challengeId: outcome.challengeId };
   }
 
   /**

@@ -1,15 +1,20 @@
 import { budgetBlock, type BudgetState } from './budget';
+import { challengeFromModelText, createChallenge } from './challenge';
 import { estimateUsd } from './cost';
 import { executeAction } from './executor';
 import { parseVisionCapture } from './extract';
 import { redactSecrets } from './password';
 import { buildGoalPrompt } from './prompt';
 import {
+  DEFAULT_CHALLENGE_TIMEOUT_MS,
   emptyCapture,
+  type ChallengeWaitResult,
   type ComputerSurface,
   type ComputerUseClient,
   type FunctionResultInput,
   type VisionCapture,
+  type VisionChallenge,
+  type VisionChallengeKind,
   type VisionGoal,
   type VisionLimits,
   type VisionRunResult,
@@ -27,6 +32,12 @@ export interface VisionLoopInput {
   limits: VisionLimits;
   now?: () => number;
   onStep?: (log: VisionStepLog) => void;
+  challengeTimeoutMs?: number;
+  /**
+   * Pauses the browser until the student answers. When omitted, the run
+   * returns AWAITING_USER_INPUT with the challenge payload.
+   */
+  awaitUserInput?: (challenge: VisionChallenge) => Promise<ChallengeWaitResult>;
 }
 
 export async function runVisionLoop(input: VisionLoopInput): Promise<VisionRunResult> {
@@ -36,6 +47,10 @@ export async function runVisionLoop(input: VisionLoopInput): Promise<VisionRunRe
   const logs: VisionStepLog[] = [];
   const screenshots: string[] = [];
   const password = input.password ?? '';
+  const secrets: string[] = [password];
+  let challengeAnswer = '';
+  let suppressPagePause = false;
+  const challengeTimeoutMs = input.challengeTimeoutMs ?? DEFAULT_CHALLENGE_TIMEOUT_MS;
   const allowTyping = input.goal === 'login_and_extract';
   const goalPrompt = buildGoalPrompt(input.goal, input.portalUrl, input.username);
   let previousInteractionId: string | undefined;
@@ -44,11 +59,16 @@ export async function runVisionLoop(input: VisionLoopInput): Promise<VisionRunRe
   let stopReason: string | undefined;
   let capture = emptyCapture();
 
-  const finish = async (next: VisionStatus, reason?: string, runExtract = false): Promise<VisionRunResult> => {
+  const finish = async (
+    next: VisionStatus,
+    reason?: string,
+    runExtract = false,
+    challenge?: VisionChallenge,
+  ): Promise<VisionRunResult> => {
     status = next;
     stopReason = reason;
     if (runExtract && next !== 'CAPTCHA_REQUIRED' && next !== 'OTP_REQUIRED' && next !== 'BLOCKED') {
-      const extracted = await extractBestEffort(input, screenshots, password);
+      const extracted = await extractBestEffort(input, screenshots, secrets);
       capture = extracted.capture;
       state.inputTokens += extracted.inputTokens;
       state.outputTokens += extracted.outputTokens;
@@ -66,7 +86,34 @@ export async function runVisionLoop(input: VisionLoopInput): Promise<VisionRunRe
       latencyMs: Math.max(0, now() - startedAt),
       logs,
       stopReason,
+      ...(challenge ? { challenge } : {}),
     };
+  };
+
+  const handoff = async (detected: { kind: VisionChallengeKind; prompt: string }): Promise<'continue' | VisionRunResult> => {
+    const cropped = await input.surface.cropChallenge?.();
+    const challenge = createChallenge({
+      kind: detected.kind,
+      prompt: detected.prompt,
+      imagePngBase64: cropped?.toString('base64'),
+      now: now(),
+      timeoutMs: challengeTimeoutMs,
+    });
+    if (!input.awaitUserInput) {
+      return finish('AWAITING_USER_INPUT', 'AWAITING_USER_INPUT', false, challenge);
+    }
+    const before = now();
+    const waited = await input.awaitUserInput(challenge);
+    state.startedAt += Math.max(0, now() - before);
+    if (waited.status === 'timeout') return finish('CHALLENGE_TIMEOUT', 'CHALLENGE_TIMEOUT');
+    if (waited.status === 'session_expired') return finish('SESSION_EXPIRED', 'SESSION_EXPIRED');
+    secrets.push(waited.answer);
+    challengeAnswer = waited.answer;
+    input.surface.noteSecret?.(waited.answer);
+    await input.surface.focusChallenge?.(detected.kind);
+    await input.surface.typeText(waited.answer, false);
+    suppressPagePause = true;
+    return 'continue';
   };
 
   try {
@@ -75,8 +122,12 @@ export async function runVisionLoop(input: VisionLoopInput): Promise<VisionRunRe
       if (blocked) return finish(blocked, blocked, blocked !== 'TIMEOUT');
 
       const challenge = await input.surface.challengeVisible();
-      if (challenge === 'captcha') return finish('CAPTCHA_REQUIRED', 'CAPTCHA_REQUIRED');
-      if (challenge === 'otp') return finish('OTP_REQUIRED', 'OTP_REQUIRED');
+      if (challenge && !suppressPagePause) {
+        const handed = await handoff(challenge);
+        if (handed !== 'continue') return handed;
+        continue;
+      }
+      suppressPagePause = false;
       if (input.goal === 'find_login_form' && (await input.surface.loginFormVisible())) {
         return finish('LOGIN_FORM_FOUND', 'LOGIN_FORM_FOUND');
       }
@@ -85,7 +136,7 @@ export async function runVisionLoop(input: VisionLoopInput): Promise<VisionRunRe
       const screenshotPngBase64 = shot.toString('base64');
       screenshots.push(screenshotPngBase64);
       if (screenshots.length > 4) screenshots.shift();
-      const htmlExcerpt = redactSecrets(await input.surface.htmlExcerpt(12_000), [password]);
+      const htmlExcerpt = redactSecrets(await input.surface.htmlExcerpt(12_000), secrets);
 
       const turn = await input.client.nextAction({
         goalPrompt,
@@ -102,8 +153,12 @@ export async function runVisionLoop(input: VisionLoopInput): Promise<VisionRunRe
       }
 
       const text = turn.text || '';
-      if (/CAPTCHA_REQUIRED/i.test(text)) return finish('CAPTCHA_REQUIRED', 'CAPTCHA_REQUIRED');
-      if (/OTP_REQUIRED/i.test(text)) return finish('OTP_REQUIRED', 'OTP_REQUIRED');
+      const modelChallenge = challengeFromModelText(text);
+      if (modelChallenge) {
+        const handed = await handoff(modelChallenge);
+        if (handed !== 'continue') return handed;
+        continue;
+      }
       if (input.goal === 'find_login_form' && /LOGIN_FORM_FOUND/i.test(text)) {
         return finish('LOGIN_FORM_FOUND', 'LOGIN_FORM_FOUND');
       }
@@ -120,20 +175,27 @@ export async function runVisionLoop(input: VisionLoopInput): Promise<VisionRunRe
         const executed = await executeAction(call, input.surface, {
           portalUrl: input.portalUrl,
           password,
+          challengeAnswer,
           allowTyping,
           passwordVisible: await input.surface.passwordFieldVisible(),
         });
+        if (executed.plan.kind === 'pause') {
+          const handed = await handoff({ kind: executed.plan.challengeKind, prompt: executed.plan.prompt });
+          if (handed !== 'continue') return handed;
+        }
         const refused = executed.plan.kind === 'refuse'
           ? executed.plan.reason
           : executed.plan.kind === 'stop'
             ? executed.plan.reason
-            : executed.error;
+            : executed.plan.kind === 'pause'
+              ? undefined
+              : executed.error;
         const log: VisionStepLog = {
           step: state.steps,
           action: call.name,
-          intent: redactSecrets(executed.plan.kind === 'execute' ? executed.plan.intent ?? '' : executed.plan.kind === 'refuse' ? executed.plan.intent ?? '' : '', [password]),
+          intent: redactSecrets(executed.plan.kind === 'execute' || executed.plan.kind === 'refuse' || executed.plan.kind === 'pause' ? executed.plan.intent ?? '' : '', secrets),
           url: input.surface.url(),
-          refused: refused ? redactSecrets(refused, [password]) : undefined,
+          refused: refused ? redactSecrets(refused, secrets) : undefined,
           inputTokens: state.inputTokens,
           outputTokens: state.outputTokens,
         };
@@ -149,14 +211,16 @@ export async function runVisionLoop(input: VisionLoopInput): Promise<VisionRunRe
           name: call.name,
           callId: call.id,
           url: input.surface.url(),
-          error: refused ? redactSecrets(refused, [password]) : undefined,
+          error: executed.plan.kind === 'pause'
+            ? 'paused for the student'
+            : refused ? redactSecrets(refused, secrets) : undefined,
           screenshotPngBase64: afterShot,
         });
       }
       functionResults = results;
     }
   } catch (err) {
-    const message = redactSecrets(err instanceof Error ? err.message : String(err), [password]);
+    const message = redactSecrets(err instanceof Error ? err.message : String(err), secrets);
     return finish('FAILED', message);
   }
 }
@@ -164,13 +228,13 @@ export async function runVisionLoop(input: VisionLoopInput): Promise<VisionRunRe
 async function extractBestEffort(
   input: VisionLoopInput,
   screenshots: string[],
-  password: string,
+  secrets: string[],
 ): Promise<{ capture: VisionCapture; inputTokens: number; outputTokens: number }> {
   if (input.goal === 'find_login_form' || screenshots.length === 0) {
     return { capture: emptyCapture(), inputTokens: 0, outputTokens: 0 };
   }
   try {
-    const htmlExcerpt = redactSecrets(await input.surface.htmlExcerpt(12_000), [password]);
+    const htmlExcerpt = redactSecrets(await input.surface.htmlExcerpt(12_000), secrets);
     const extracted = await input.client.extract({
       screenshots: screenshots.slice(-3),
       htmlExcerpt,

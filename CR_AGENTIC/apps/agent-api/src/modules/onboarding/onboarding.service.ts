@@ -1,5 +1,6 @@
-import { BadRequestException, Injectable, Logger, NotFoundException } from '@nestjs/common';
+import { BadRequestException, Inject, Injectable, Logger, NotFoundException } from '@nestjs/common';
 import { randomUUID } from 'crypto';
+import Redis from 'ioredis';
 import { prisma, OnboardingStage, Prisma } from '@cr-agentic/database';
 import { writeAuditLog } from '@cr-agentic/observability';
 import { assertTransition, isTerminal } from './onboarding-state-machine';
@@ -11,6 +12,9 @@ import {
   sessionIsDemo,
   universityIsDemo as universityRecordIsDemo,
 } from './reviewer-demo';
+import { REDIS_CLIENT } from '../queue/queue.module';
+import { loadChallengeView } from './challenge-view';
+import type { ChallengeRedis } from '@cr-agentic/vision-fallback';
 
 const ONBOARDING_TTL_MS = 24 * 60 * 60 * 1000;
 
@@ -18,7 +22,10 @@ const ONBOARDING_TTL_MS = 24 * 60 * 60 * 1000;
 export class OnboardingService {
   private readonly logger = new Logger(OnboardingService.name);
 
-  constructor(private readonly courseRep: CourseRepClient) {}
+  constructor(
+    private readonly courseRep: CourseRepClient,
+    @Inject(REDIS_CLIENT) private readonly redis: Redis,
+  ) {}
 
   async start(userId: string, dto: StartOnboardingRequestDto) {
     await this.courseRep.getUser(userId);
@@ -220,6 +227,11 @@ export class OnboardingService {
       orderBy: { confidence: 'desc' },
     });
 
+    const challengeView = await loadChallengeView(
+      this.redis as unknown as ChallengeRedis,
+      sessionId,
+      session.expiresAt,
+    );
     return {
       id: session.id,
       stage: session.stage,
@@ -233,6 +245,8 @@ export class OnboardingService {
       completedAt: session.completedAt,
       isTerminal: isTerminal(session.stage),
       demo: sessionIsDemo(session.metadata),
+      visionStatus: challengeView.visionStatus,
+      challenge: challengeView.challenge,
     };
   }
 

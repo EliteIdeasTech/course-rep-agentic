@@ -6,6 +6,8 @@ export {
   DEFAULT_TOKEN_BUDGET,
   DEFAULT_VIEWPORT,
   GEMINI_38_FLASH_USD_PER_MILLION,
+  CHALLENGE_ANSWER_PLACEHOLDER,
+  DEFAULT_CHALLENGE_TIMEOUT_MS,
   PASSWORD_PLACEHOLDER,
   emptyCapture,
 } from './types';
@@ -16,7 +18,10 @@ export type {
   FunctionResultInput,
   ModelFunctionCall,
   ModelTurn,
+  ChallengeWaitResult,
   VisionCapture,
+  VisionChallenge,
+  VisionChallengeKind,
   VisionCourse,
   VisionGoal,
   VisionLimits,
@@ -29,6 +34,17 @@ export type {
 export { substitutePassword, redactSecrets, assertNoPassword } from './password';
 export { registrableDomain, isNavigationAllowed } from './domain';
 export { classifyAction, pageChallenge } from './safety';
+export {
+  challengeFromModelText,
+  challengeTimeoutFromEnv,
+  createChallenge,
+  publishAndWaitForChallenge,
+  readPendingChallenge,
+  submitChallengeAnswer,
+  visionChallengeAnswerKey,
+  visionChallengeKey,
+} from './challenge';
+export type { ChallengeRedis, ChallengeSubmitResult } from './challenge';
 export { budgetBlock, limitsFromEnv } from './budget';
 export { estimateUsd, estimateNgn } from './cost';
 export { visionFallbackEnabled, resolveGeminiApiKey, visionModelFromEnv } from './flag';

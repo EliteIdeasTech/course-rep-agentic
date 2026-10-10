@@ -1,4 +1,4 @@
-import { PASSWORD_PLACEHOLDER } from './types';
+import { CHALLENGE_ANSWER_PLACEHOLDER, PASSWORD_PLACEHOLDER } from './types';
 
 export function substitutePassword(text: string, password: string): {
   text: string;
@@ -16,7 +16,11 @@ export function substitutePassword(text: string, password: string): {
 /** Removes the live password and the placeholder from anything that might be logged or sent back. */
 export function redactSecrets(value: string, secrets: Array<string | undefined | null>): string {
   let out = value;
-  const needles = [PASSWORD_PLACEHOLDER, ...secrets.filter((s): s is string => !!s && s.length > 0)];
+  const needles = [
+    PASSWORD_PLACEHOLDER,
+    CHALLENGE_ANSWER_PLACEHOLDER,
+    ...secrets.filter((s): s is string => !!s && s.length > 0),
+  ];
   for (const secret of needles) {
     if (!out.includes(secret)) continue;
     out = out.split(secret).join('[redacted]');

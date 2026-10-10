@@ -1,4 +1,4 @@
-import type { ComputerSurface } from './types';
+import type { ComputerSurface, VisionChallengeKind } from './types';
 import { DEFAULT_VIEWPORT } from './types';
 import { pageChallenge } from './safety';
 
@@ -9,7 +9,7 @@ import { pageChallenge } from './safety';
 export interface PlaywrightLikePage {
   url(): string;
   viewportSize(): { width: number; height: number } | null;
-  screenshot(options?: { type?: 'png' }): Promise<Buffer>;
+  screenshot(options?: { type?: 'png'; clip?: { x: number; y: number; width: number; height: number } }): Promise<Buffer>;
   content(): Promise<string>;
   setViewportSize(size: { width: number; height: number }): Promise<void>;
   evaluate<T, A = undefined>(pageFunction: (arg: A) => T | Promise<T>, arg?: A): Promise<T>;
@@ -36,10 +36,11 @@ export async function playwrightSurface(page: PlaywrightLikePage): Promise<Compu
   if (!current) {
     await page.setViewportSize(DEFAULT_VIEWPORT);
   }
+  const secrets = new Set<string>();
   return {
     viewport: () => page.viewportSize() ?? DEFAULT_VIEWPORT,
     url: () => page.url(),
-    screenshot: () => screenshotMasked(page),
+    screenshot: () => screenshotMasked(page, secrets),
     htmlExcerpt: async (maxChars) => (await page.content()).slice(0, maxChars),
     elementAt: (x, y) =>
       page.evaluate((point) => {
@@ -68,6 +69,11 @@ export async function playwrightSurface(page: PlaywrightLikePage): Promise<Compu
       const text = await page.evaluate(() => document.body?.innerText?.slice(0, 4000) ?? '');
       const html = await page.content();
       return pageChallenge(`${text}\n${html.slice(0, 4000)}`);
+    },
+    cropChallenge: () => cropChallenge(page),
+    focusChallenge: (kind) => focusChallenge(page, kind),
+    noteSecret: (value) => {
+      if (value) secrets.add(value);
     },
     click: async (x, y, button = 'left', clickCount = 1) => {
       if (clickCount === 2) {
@@ -105,18 +111,26 @@ export async function playwrightSurface(page: PlaywrightLikePage): Promise<Compu
   };
 }
 
-async function screenshotMasked(page: PlaywrightLikePage): Promise<Buffer> {
-  await page.evaluate(() => {
+async function screenshotMasked(page: PlaywrightLikePage, secrets: Set<string>): Promise<Buffer> {
+  const secretList = [...secrets];
+  await page.evaluate((hidden) => {
     document.querySelectorAll('[data-cr-password-mask]').forEach((node) => node.remove());
-    document.querySelectorAll('input[type="password"]').forEach((el) => {
+    const cover = (el: Element) => {
       const rect = el.getBoundingClientRect();
       if (rect.width < 2 || rect.height < 2) return;
       const mask = document.createElement('div');
       mask.setAttribute('data-cr-password-mask', '1');
       mask.style.cssText = `position:fixed;left:${rect.left}px;top:${rect.top}px;width:${rect.width}px;height:${rect.height}px;background:#111;z-index:2147483647;pointer-events:none;`;
       document.documentElement.appendChild(mask);
-    });
-  }).catch(() => undefined);
+    };
+    document.querySelectorAll('input[type="password"]').forEach(cover);
+    if (hidden.length > 0) {
+      document.querySelectorAll('input, textarea').forEach((el) => {
+        const value = (el as HTMLInputElement).value;
+        if (value && hidden.some((secret) => value.includes(secret))) cover(el);
+      });
+    }
+  }, secretList).catch(() => undefined);
   try {
     return await page.screenshot({ type: 'png' });
   } finally {
@@ -124,5 +138,48 @@ async function screenshotMasked(page: PlaywrightLikePage): Promise<Buffer> {
       document.querySelectorAll('[data-cr-password-mask]').forEach((node) => node.remove());
     }).catch(() => undefined);
   }
+}
+
+async function cropChallenge(page: PlaywrightLikePage): Promise<Buffer | null> {
+  const box = await page.evaluate(() => {
+    const nodes = Array.from(document.querySelectorAll(
+      'img, canvas, [class*="captcha" i], [id*="captcha" i], input[autocomplete="one-time-code"]',
+    ));
+    const el = nodes.find((node) => {
+      const rect = node.getBoundingClientRect();
+      return rect.width > 8 && rect.height > 8;
+    });
+    if (!el) return null;
+    const rect = el.getBoundingClientRect();
+    return { x: rect.x, y: rect.y, width: rect.width, height: rect.height };
+  }).catch(() => null);
+  if (!box) return null;
+  const pad = 8;
+  return page.screenshot({
+    type: 'png',
+    clip: {
+      x: Math.max(0, box.x - pad),
+      y: Math.max(0, box.y - pad),
+      width: Math.max(1, box.width + pad * 2),
+      height: Math.max(1, box.height + pad * 2),
+    },
+  });
+}
+
+async function focusChallenge(page: PlaywrightLikePage, kind: VisionChallengeKind): Promise<boolean> {
+  const selector = kind === 'captcha'
+    ? 'input[name*="captcha" i], input[id*="captcha" i], input[placeholder*="captcha" i], input[aria-label*="captcha" i]'
+    : kind === 'otp'
+      ? 'input[autocomplete="one-time-code"], input[name*="otp" i], input[id*="otp" i], input[name*="code" i], input[id*="code" i]'
+      : kind === 'security_question'
+        ? 'input[name*="answer" i], input[id*="answer" i], textarea'
+        : 'input[type="text"], input:not([type="hidden"]):not([type="password"])';
+  return page.evaluate((sel) => {
+    const el = document.querySelector(sel) as HTMLElement | null;
+    if (!el) return false;
+    el.focus();
+    el.click();
+    return true;
+  }, selector).catch(() => false);
 }
 

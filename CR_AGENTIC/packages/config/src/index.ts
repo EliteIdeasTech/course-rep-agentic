@@ -54,6 +54,7 @@ export const agentEnvSchema = z.object({
   VISION_FALLBACK_MAX_STEPS: z.coerce.number().default(25),
   VISION_FALLBACK_TIMEOUT_MS: z.coerce.number().default(180_000),
   VISION_FALLBACK_TOKEN_BUDGET: z.coerce.number().default(200_000),
+  VISION_CHALLENGE_TIMEOUT_MS: z.coerce.number().default(180_000),
   PORTAL_SEARCH_ENDPOINT: z.string().default('https://google.serper.dev/search'),
   BROWSER_MAX_CONTEXTS: z.coerce.number().default(50),
   BROWSER_HEADLESS: z

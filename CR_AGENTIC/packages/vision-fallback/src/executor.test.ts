@@ -79,26 +79,42 @@ describe('action executor', () => {
     assert.equal(login.kind, 'execute');
   });
 
-  it('stops on captcha and refuses navigation off the portal domain', () => {
+  it('pauses on captcha and OTP instead of solving them, and refuses navigation off the portal domain', () => {
     const captcha = decideAction(
       { id: '1', name: 'click', arguments: { x: 1, y: 1, intent: 'Solve the CAPTCHA' } },
       ctx(),
     );
-    assert.equal(captcha.kind, 'stop');
-    if (captcha.kind === 'stop') assert.equal(captcha.status, 'CAPTCHA_REQUIRED');
+    assert.equal(captcha.kind, 'pause');
+    if (captcha.kind === 'pause') assert.equal(captcha.challengeKind, 'captcha');
 
     const otp = decideAction(
       { id: '2', name: 'type', arguments: { text: '123456', intent: 'Enter the OTP' } },
       ctx(),
     );
-    assert.equal(otp.kind, 'stop');
-    if (otp.kind === 'stop') assert.equal(otp.status, 'OTP_REQUIRED');
+    assert.equal(otp.kind, 'pause');
+    if (otp.kind === 'pause') assert.equal(otp.challengeKind, 'otp');
 
     const nav = decideAction(
       { id: '3', name: 'navigate', arguments: { url: 'https://payments.example.com/checkout', intent: 'Open checkout' } },
       ctx(),
     );
     assert.equal(nav.kind, 'refuse');
+  });
+
+  it('types a stored challenge answer in place of the placeholder', () => {
+    const typed = decideAction(
+      { id: '1', name: 'type', arguments: { text: '{{CR_CHALLENGE_ANSWER}}', intent: 'Type the code field' } },
+      ctx({ challengeAnswer: '482913' }),
+    );
+    assert.equal(typed.kind, 'execute');
+    if (typed.kind === 'execute' && typed.action.kind === 'type') {
+      assert.equal(typed.action.text, '482913');
+    }
+    const echoed = decideAction(
+      { id: '2', name: 'type', arguments: { text: '482913', intent: 'Type the code' } },
+      ctx({ challengeAnswer: '482913', element: null }),
+    );
+    assert.equal(echoed.kind, 'refuse');
   });
 
   it('refuses a model that echoes the raw password', () => {

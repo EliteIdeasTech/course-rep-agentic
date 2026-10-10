@@ -97,7 +97,7 @@ describe('offline recorded screenshot replay', () => {
       elementAt: async () => null,
       passwordFieldVisible: async () => true,
       loginFormVisible: async () => true,
-      challengeVisible: async () => 'captcha',
+      challengeVisible: async () => ({ kind: 'captcha' as const, prompt: 'Enter the characters shown in the captcha image.' }),
       click: async () => undefined,
       move: async () => undefined,
       typeText: async () => undefined,
@@ -127,7 +127,8 @@ describe('offline recorded screenshot replay', () => {
       limits: { maxSteps: 25, timeoutMs: 5_000, tokenBudget: 1000 },
       now: () => 1,
     });
-    assert.equal(captcha.status, 'CAPTCHA_REQUIRED');
+    assert.equal(captcha.status, 'AWAITING_USER_INPUT');
+    assert.equal(captcha.challenge?.kind, 'captcha');
     assert.equal(calls, 0);
 
     const spinning: ComputerSurface = { ...surface, challengeVisible: async () => null };

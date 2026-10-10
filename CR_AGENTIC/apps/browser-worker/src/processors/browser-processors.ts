@@ -20,8 +20,10 @@ import { createHash } from 'crypto';
 import { SessionCrypto } from '@cr-agentic/storage';
 import type { BrowserCredentialLoginJob } from '@cr-agentic/shared';
 import {
+  publishAndWaitForChallenge,
   runPortalVisionFallback,
   saveVisionCapture,
+  type ChallengeRedis,
   type PlaywrightLikePage,
 } from '@cr-agentic/vision-fallback';
 
@@ -223,6 +225,13 @@ export class BrowserProcessors {
             goal: 'login_and_extract',
             username: credentials.username,
             password: credentials.password,
+            awaitUserInput: (challenge) =>
+              publishAndWaitForChallenge(
+                this.redis as unknown as ChallengeRedis,
+                job.data.onboardingSessionId,
+                challenge,
+                { isSessionOpen: () => visionSessionStillOpen(job.data.onboardingSessionId) },
+              ),
             onStep: (step) => {
               logger.info(
                 {
@@ -258,7 +267,11 @@ export class BrowserProcessors {
                 { onboardingSessionId: job.data.onboardingSessionId, userId: job.data.userId },
                 vision.capture,
               ).catch((err) => logger.warn({ err }, 'vision capture persist failed'));
-            } else if (vision.status === 'CAPTCHA_REQUIRED' || vision.status === 'OTP_REQUIRED') {
+            } else if (
+              vision.status === 'CHALLENGE_TIMEOUT' ||
+              vision.status === 'SESSION_EXPIRED' ||
+              vision.status === 'AWAITING_USER_INPUT'
+            ) {
               interactiveReason = vision.status;
             } else if (vision.status !== 'SKIPPED') {
               interactiveReason = vision.status;
@@ -276,6 +289,7 @@ export class BrowserProcessors {
             OnboardingStage.LOGIN_IN_PROGRESS,
             OnboardingStage.REAUTH_REQUIRED,
             { reason: interactiveReason },
+            challengeFailure(interactiveReason),
           );
           metrics.increment('browser.credential_login.needs_interactive');
           return;
@@ -651,4 +665,27 @@ export class BrowserProcessors {
       await moveToDlq(this.redis, queueName, String(job.id), job.data, err);
     }
   }
+}
+
+function challengeFailure(reason: string): { lastError?: { code: string; message: string } } {
+  if (reason === 'CHALLENGE_TIMEOUT') {
+    return { lastError: { code: reason, message: 'The verification prompt expired before an answer arrived.' } };
+  }
+  if (reason === 'SESSION_EXPIRED') {
+    return { lastError: { code: reason, message: 'The onboarding session expired while waiting for an answer.' } };
+  }
+  if (reason === 'AWAITING_USER_INPUT') {
+    return { lastError: { code: reason, message: 'The portal is waiting for a code or captcha answer.' } };
+  }
+  return {};
+}
+
+async function visionSessionStillOpen(sessionId: string): Promise<boolean> {
+  const row = await prisma.onboardingSession.findUnique({
+    where: { id: sessionId },
+    select: { expiresAt: true, stage: true },
+  });
+  if (!row) return false;
+  if (row.expiresAt.getTime() <= Date.now()) return false;
+  return row.stage !== 'CANCELLED' && row.stage !== 'FAILED';
 }

@@ -1,6 +1,12 @@
 /** Placeholder the model is told to type. The executor swaps in the real password. */
 export const PASSWORD_PLACEHOLDER = '{{CR_PORTAL_PASSWORD}}';
 
+/**
+ * Placeholder for an OTP, captcha, or security-question answer. The executor
+ * swaps in the student's reply locally. The model never receives that reply.
+ */
+export const CHALLENGE_ANSWER_PLACEHOLDER = '{{CR_CHALLENGE_ANSWER}}';
+
 /** Computer Use model from the Gemini Interactions API (browser environment). */
 export const COMPUTER_USE_MODEL = 'gemini-3.8-flash';
 
@@ -10,6 +16,8 @@ export const COORD_SCALE = 1000;
 export const DEFAULT_MAX_STEPS = 25;
 export const DEFAULT_TIMEOUT_MS = 180_000;
 export const DEFAULT_TOKEN_BUDGET = 200_000;
+/** How long a paused challenge waits for the student. */
+export const DEFAULT_CHALLENGE_TIMEOUT_MS = 180_000;
 export const DEFAULT_VIEWPORT = { width: 1440, height: 900 };
 
 /**
@@ -27,6 +35,9 @@ export type VisionStatus =
   | 'SIGNED_IN'
   | 'CAPTURED'
   | 'LOGIN_FORM_FOUND'
+  | 'AWAITING_USER_INPUT'
+  | 'CHALLENGE_TIMEOUT'
+  | 'SESSION_EXPIRED'
   | 'CAPTCHA_REQUIRED'
   | 'OTP_REQUIRED'
   | 'BUDGET_EXCEEDED'
@@ -82,6 +93,22 @@ export interface VisionStepLog {
   outputTokens: number;
 }
 
+export type VisionChallengeKind = 'otp' | 'captcha' | 'security_question' | 'other';
+
+/** Shown to the student while the browser session is paused. No answer is included. */
+export interface VisionChallenge {
+  id: string;
+  kind: VisionChallengeKind;
+  prompt: string;
+  imagePngBase64?: string;
+  expiresAt: string;
+}
+
+export type ChallengeWaitResult =
+  | { status: 'answer'; answer: string }
+  | { status: 'timeout' }
+  | { status: 'session_expired' };
+
 export interface VisionRunResult {
   status: VisionStatus;
   capture: VisionCapture;
@@ -92,6 +119,8 @@ export interface VisionRunResult {
   latencyMs: number;
   logs: VisionStepLog[];
   stopReason?: string;
+  /** Set when the run paused and no answer handler was attached. */
+  challenge?: VisionChallenge;
 }
 
 export interface ElementSnapshot {
@@ -111,7 +140,13 @@ export interface ComputerSurface {
   elementAt(x: number, y: number): Promise<ElementSnapshot | null>;
   passwordFieldVisible(): Promise<boolean>;
   loginFormVisible(): Promise<boolean>;
-  challengeVisible(): Promise<'captcha' | 'otp' | null>;
+  challengeVisible(): Promise<{ kind: VisionChallengeKind; prompt: string } | null>;
+  /** Crop of the captcha or prompt control, when one is on screen. */
+  cropChallenge?(): Promise<Buffer | null>;
+  /** Click the input the student is being asked to fill. */
+  focusChallenge?(kind: VisionChallengeKind): Promise<boolean>;
+  /** Remember a secret so later screenshots can cover it. */
+  noteSecret?(value: string): void;
   click(x: number, y: number, button?: 'left' | 'right' | 'middle', clickCount?: number): Promise<void>;
   move(x: number, y: number): Promise<void>;
   typeText(text: string, pressEnter: boolean): Promise<void>;

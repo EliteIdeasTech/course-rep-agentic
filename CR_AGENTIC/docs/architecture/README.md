@@ -26,7 +26,7 @@ Endpoints:
 
 ## Vision fallback
 
-`VISION_FALLBACK_ENABLED` defaults to false. When it is on, or a session's metadata `visionFallbackEnabled` is true, a failed scripted login or an empty course/profile scrape can run Gemini Computer Use (`gemini-3.8-flash`, browser tool). The model types the placeholder `{{CR_PORTAL_PASSWORD}}`; the executor substitutes the password locally. Navigation stays on the portal's registrable domain. Captcha and OTP stop with `CAPTCHA_REQUIRED` or `OTP_REQUIRED`. Demo sessions never enable it.
+`VISION_FALLBACK_ENABLED` defaults to false. When it is on, or a session's metadata `visionFallbackEnabled` is true, a failed scripted login or an empty course/profile scrape can run Gemini Computer Use (`gemini-3.8-flash`, browser tool). The model types the placeholder `{{CR_PORTAL_PASSWORD}}`; the executor substitutes the password locally. Navigation stays on the portal's registrable domain. An OTP, captcha, security question, or other unknown code pauses the session as `AWAITING_USER_INPUT` until `POST /onboarding/:sessionId/challenge`. The answer is typed locally and is not sent to the model. The pause expires after `VISION_CHALLENGE_TIMEOUT_MS` (default 3 minutes) with `CHALLENGE_TIMEOUT`. Demo sessions never enable it.
 
 Internal routes require header: `X-Internal-Secret: <INTERNAL_API_SECRET>`
 

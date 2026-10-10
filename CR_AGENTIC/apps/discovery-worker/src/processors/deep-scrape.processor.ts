@@ -26,8 +26,10 @@ import {
   type PageObservation,
 } from '../agent/course-agent';
 import {
+  publishAndWaitForChallenge,
   runPortalVisionFallback,
   saveVisionCapture,
+  type ChallengeRedis,
   type PlaywrightLikePage,
   type VisionCourse,
 } from '@cr-agentic/vision-fallback';
@@ -637,6 +639,18 @@ export class DeepScrapeProcessor {
       page: page as unknown as PlaywrightLikePage,
       portalUrl,
       goal: 'extract',
+      awaitUserInput: (challenge) =>
+        publishAndWaitForChallenge(this.redis as unknown as ChallengeRedis, onboardingSessionId, challenge, {
+          isSessionOpen: async () => {
+            const row = await prisma.onboardingSession.findUnique({
+              where: { id: onboardingSessionId },
+              select: { expiresAt: true, stage: true },
+            });
+            if (!row) return false;
+            if (row.expiresAt.getTime() <= Date.now()) return false;
+            return row.stage !== 'CANCELLED' && row.stage !== 'FAILED';
+          },
+        }),
       onStep: (step) => {
         logger.info(
           {
@@ -666,7 +680,20 @@ export class DeepScrapeProcessor {
       },
       'vision fallback finished',
     );
-    if (outcome.status === 'CAPTCHA_REQUIRED' || outcome.status === 'OTP_REQUIRED') {
+    if (
+      outcome.status === 'CHALLENGE_TIMEOUT' ||
+      outcome.status === 'SESSION_EXPIRED' ||
+      outcome.status === 'AWAITING_USER_INPUT'
+    ) {
+      const message = outcome.status === 'CHALLENGE_TIMEOUT'
+        ? 'The verification prompt expired before an answer arrived.'
+        : outcome.status === 'SESSION_EXPIRED'
+          ? 'The onboarding session expired while waiting for an answer.'
+          : 'The portal is waiting for a code or captcha answer.';
+      await prisma.onboardingSession.update({
+        where: { id: onboardingSessionId },
+        data: { lastError: { code: outcome.status, message } },
+      }).catch((err) => logger.warn({ err, onboardingSessionId }, 'vision challenge status write failed'));
       return outcome;
     }
     await saveVisionCapture(

@@ -1,9 +1,10 @@
 import { limitsFromEnv } from './budget';
+import { challengeTimeoutFromEnv } from './challenge';
 import { GeminiComputerUseClient } from './gemini';
 import { resolveGeminiApiKey, visionFallbackEnabled, visionModelFromEnv } from './flag';
 import { runVisionLoop } from './loop';
 import { playwrightSurface, type PlaywrightLikePage } from './playwright-surface';
-import type { VisionGoal, VisionRunResult, VisionStepLog } from './types';
+import type { ChallengeWaitResult, VisionChallenge, VisionGoal, VisionRunResult, VisionStepLog } from './types';
 
 export async function runPortalVisionFallback(input: {
   env: {
@@ -12,6 +13,7 @@ export async function runPortalVisionFallback(input: {
     VISION_FALLBACK_MAX_STEPS?: string;
     VISION_FALLBACK_TIMEOUT_MS?: string;
     VISION_FALLBACK_TOKEN_BUDGET?: string;
+    VISION_CHALLENGE_TIMEOUT_MS?: string;
     GEMINI_API_KEY?: string;
     GOOGLE_API_KEY?: string;
     GOOGLE_GENAI_API_KEY?: string;
@@ -25,6 +27,7 @@ export async function runPortalVisionFallback(input: {
   username?: string;
   password?: string;
   onStep?: (log: VisionStepLog) => void;
+  awaitUserInput?: (challenge: VisionChallenge) => Promise<ChallengeWaitResult>;
 }): Promise<VisionRunResult | null> {
   if (!visionFallbackEnabled(input.env, input.metadata)) return null;
   const apiKey = resolveGeminiApiKey(input.env);
@@ -51,6 +54,8 @@ export async function runPortalVisionFallback(input: {
     username: input.username,
     password: input.password,
     limits: limitsFromEnv(input.env),
+    challengeTimeoutMs: challengeTimeoutFromEnv(input.env),
     onStep: input.onStep,
+    awaitUserInput: input.awaitUserInput,
   });
 }
