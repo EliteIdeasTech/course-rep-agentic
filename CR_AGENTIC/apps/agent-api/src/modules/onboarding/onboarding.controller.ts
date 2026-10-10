@@ -19,6 +19,7 @@ import {
   ConfirmPortalRequestDto,
   CourseImportSelectionDto,
   CredentialLoginRequestDto,
+  SubmitChallengeAnswerDto,
   LoginBridgeRequestDto,
   ManualPortalRequestDto,
   StartOnboardingRequestDto,
@@ -143,6 +144,19 @@ export class OnboardingController {
   ) {
     const actor = await this.login.resolveActor(sessionId, userId, guestToken);
     return this.login.credentialLogin(actor, sessionId, dto);
+  }
+
+  @Post(':sessionId/challenge')
+  async submitChallenge(
+    @CurrentUser('id') userId: string | undefined,
+    @Param('sessionId') sessionId: string,
+    @Body() dto: SubmitChallengeAnswerDto,
+    @Headers('x-onboarding-guest-token') guestToken?: string,
+  ) {
+    const actor = await this.login.resolveActor(sessionId, userId, guestToken);
+    const answer = dto.answer;
+    dto.answer = '';
+    return this.login.submitChallenge(actor, sessionId, answer);
   }
 
   @Get(':sessionId/login/status')

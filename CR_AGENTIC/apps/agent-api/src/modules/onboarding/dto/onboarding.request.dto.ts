@@ -6,6 +6,8 @@ import {
   IsString,
   IsUUID,
   IsUrl,
+  MaxLength,
+  MinLength,
   ValidateIf,
   ValidateNested,
 } from 'class-validator';
@@ -94,6 +96,17 @@ export class LoginBridgeRequestDto {
   @ValidateNested()
   @Type(() => StorageStateDto)
   storageState!: StorageStateDto;
+}
+
+export class SubmitChallengeAnswerDto {
+  @ApiProperty({
+    description:
+      'Student reply for the paused OTP, captcha, security question, or other prompt. Used once, then discarded. Never logged.',
+  })
+  @IsString()
+  @MinLength(1)
+  @MaxLength(500)
+  answer!: string;
 }
 
 export class CredentialLoginRequestDto {

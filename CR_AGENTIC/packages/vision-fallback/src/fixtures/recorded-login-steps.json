@@ -1,0 +1,26 @@
+{
+  "description": "Recorded computer-use steps for an offline login-form replay. Coordinates are on the 0-999 grid.",
+  "screenshot": "iVBORw0KGgoAAAANSUhEUgAAAAEAAAABCAYAAAAfFcSJAAAADUlEQVR42mP8z8BQDwAEhQGAhKmMIQAAAABJRU5ErkJggg==",
+  "steps": [
+    {
+      "id": "rec-1",
+      "name": "click",
+      "arguments": { "x": 400, "y": 300, "intent": "Click the username field" }
+    },
+    {
+      "id": "rec-2",
+      "name": "type",
+      "arguments": { "text": "student", "intent": "Type the username" }
+    },
+    {
+      "id": "rec-3",
+      "name": "type",
+      "arguments": { "text": "{{CR_PORTAL_PASSWORD}}", "intent": "Type the password placeholder" }
+    },
+    {
+      "id": "rec-4",
+      "name": "click",
+      "arguments": { "x": 420, "y": 460, "intent": "Click Sign in" }
+    }
+  ]
+}
