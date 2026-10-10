@@ -102,6 +102,12 @@ services:
     container_name: cr-browser-worker
     environment:
       <<: *agent-db-env
+      VISION_FALLBACK_ENABLED: ${VISION_FALLBACK_ENABLED:-false}
+      GEMINI_API_KEY: ${GEMINI_API_KEY:-}
+      VISION_FALLBACK_MODEL: ${VISION_FALLBACK_MODEL:-gemini-3.8-flash}
+      VISION_FALLBACK_MAX_STEPS: ${VISION_FALLBACK_MAX_STEPS:-25}
+      VISION_FALLBACK_TIMEOUT_MS: ${VISION_FALLBACK_TIMEOUT_MS:-180000}
+      VISION_FALLBACK_TOKEN_BUDGET: ${VISION_FALLBACK_TOKEN_BUDGET:-200000}
     shm_size: '2gb'
 
   ai-worker:
@@ -123,6 +129,12 @@ services:
     container_name: cr-discovery-worker
     environment:
       <<: *agent-db-env
+      VISION_FALLBACK_ENABLED: ${VISION_FALLBACK_ENABLED:-false}
+      GEMINI_API_KEY: ${GEMINI_API_KEY:-}
+      VISION_FALLBACK_MODEL: ${VISION_FALLBACK_MODEL:-gemini-3.8-flash}
+      VISION_FALLBACK_MAX_STEPS: ${VISION_FALLBACK_MAX_STEPS:-25}
+      VISION_FALLBACK_TIMEOUT_MS: ${VISION_FALLBACK_TIMEOUT_MS:-180000}
+      VISION_FALLBACK_TOKEN_BUDGET: ${VISION_FALLBACK_TOKEN_BUDGET:-200000}
     shm_size: '2gb'
 
 networks:

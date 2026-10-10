@@ -24,6 +24,10 @@ Endpoints:
 - `GET /universities/:id` — public fallback used only when the internal route 404s. Today this returns demo rows inside `{ success, data }`. Public lists already exclude them, and this GET may start excluding them too, so demo detection must not depend on it.
 - `POST /internal/reviewer-demo/provision` — `{ userId, universityId }` for an `isDemo` university. Same `X-Internal-Secret` as import-from-agent. Nest serves it at `/api/internal/reviewer-demo/provision`.
 
+## Vision fallback
+
+`VISION_FALLBACK_ENABLED` defaults to false. When it is on, or a session's metadata `visionFallbackEnabled` is true, a failed scripted login or an empty course/profile scrape can run Gemini Computer Use (`gemini-3.8-flash`, browser tool). The model types the placeholder `{{CR_PORTAL_PASSWORD}}`; the executor substitutes the password locally. Navigation stays on the portal's registrable domain. Captcha and OTP stop with `CAPTCHA_REQUIRED` or `OTP_REQUIRED`. Demo sessions never enable it.
+
 Internal routes require header: `X-Internal-Secret: <INTERNAL_API_SECRET>`
 
 ## Standalone deployment & onboarding

@@ -1,0 +1,18 @@
+{
+  "name": "@cr-agentic/vision-fallback",
+  "version": "0.1.0",
+  "private": true,
+  "main": "dist/index.js",
+  "types": "dist/index.d.ts",
+  "scripts": {
+    "build": "tsc -p tsconfig.json",
+    "test": "tsc -p tsconfig.test.json && mkdir -p /tmp/vision-fallback-test && cp -R src/fixtures /tmp/vision-fallback-test/fixtures && node --test $(find /tmp/vision-fallback-test -name '*.test.js')"
+  },
+  "dependencies": {
+    "playwright-core": "^1.49.1"
+  },
+  "devDependencies": {
+    "@types/node": "^22.10.0",
+    "typescript": "^5.7.2"
+  }
+}

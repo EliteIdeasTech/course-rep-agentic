@@ -25,6 +25,12 @@ import {
   type LearnedPath,
   type PageObservation,
 } from '../agent/course-agent';
+import {
+  runPortalVisionFallback,
+  saveVisionCapture,
+  type PlaywrightLikePage,
+  type VisionCourse,
+} from '@cr-agentic/vision-fallback';
 
 const logger = createLogger('deep-scrape-processor');
 // BUILD_STAMP: 20260928a-agentic-course-discovery
@@ -263,6 +269,7 @@ export class DeepScrapeProcessor {
     }
     if (rows.length === 0) {
       logger.warn({ onboardingSessionId, tableText: tableText.slice(0, 300) }, 'GPA rows empty');
+      await this.visionExtract(page, home, onboardingSessionId, userId);
       return;
     }
 
@@ -308,6 +315,14 @@ export class DeepScrapeProcessor {
         'Adapter course list not trustworthy; running portal agent',
       );
       finalCourses = await this.runAgent(page, account, home, this.courseGoal(), onboardingSessionId, userId);
+    }
+
+    if (finalCourses.length === 0) {
+      const already = await prisma.discoveredCourse.count({ where: { onboardingSessionId } });
+      if (already === 0) {
+        const visionCourses = await this.visionCourses(page, home, onboardingSessionId, userId);
+        if (visionCourses.length > 0) finalCourses = visionCourses;
+      }
     }
 
     const seenCourses = new Set<string>();
@@ -588,6 +603,82 @@ export class DeepScrapeProcessor {
     return true;
   }
 
+  /**
+   * Scripted course or GPA parsing found nothing. One computer-use pass per
+   * session, then the same profile/course/GPA rows the scraper writes.
+   */
+  private async visionCourses(
+    page: Page,
+    portalUrl: string,
+    onboardingSessionId: string,
+    userId: string,
+  ): Promise<VisionCourse[]> {
+    const outcome = await this.visionExtract(page, portalUrl, onboardingSessionId, userId);
+    const saved = await prisma.discoveredCourse.count({ where: { onboardingSessionId } });
+    if (saved > 0) return [];
+    return outcome?.capture.courses ?? [];
+  }
+
+  private async visionExtract(
+    page: Page,
+    portalUrl: string,
+    onboardingSessionId: string,
+    userId: string,
+  ) {
+    const ranKey = `cr:agent:vision-ran:${onboardingSessionId}`;
+    if (await this.redis.get(ranKey)) return null;
+    const session = await prisma.onboardingSession.findUnique({
+      where: { id: onboardingSessionId },
+      select: { metadata: true },
+    });
+    const outcome = await runPortalVisionFallback({
+      env: process.env,
+      metadata: session?.metadata,
+      page: page as unknown as PlaywrightLikePage,
+      portalUrl,
+      goal: 'extract',
+      onStep: (step) => {
+        logger.info(
+          {
+            onboardingSessionId,
+            step: step.step,
+            action: step.action,
+            refused: step.refused,
+            inputTokens: step.inputTokens,
+            outputTokens: step.outputTokens,
+          },
+          'vision fallback step',
+        );
+      },
+    });
+    if (!outcome || outcome.status === 'SKIPPED') return outcome;
+    await this.redis.set(ranKey, outcome.status, 'EX', 60 * 60);
+    logger.info(
+      {
+        onboardingSessionId,
+        status: outcome.status,
+        steps: outcome.steps,
+        inputTokens: outcome.inputTokens,
+        outputTokens: outcome.outputTokens,
+        estimatedUsd: outcome.estimatedUsd,
+        latencyMs: outcome.latencyMs,
+        stopReason: outcome.stopReason,
+      },
+      'vision fallback finished',
+    );
+    if (outcome.status === 'CAPTCHA_REQUIRED' || outcome.status === 'OTP_REQUIRED') {
+      return outcome;
+    }
+    await saveVisionCapture(
+      prisma as unknown as Parameters<typeof saveVisionCapture>[0],
+      { onboardingSessionId, userId },
+      outcome.capture,
+    ).catch((err) =>
+      logger.warn({ err, onboardingSessionId }, 'vision profile persist failed'),
+    );
+    return outcome;
+  }
+
   /** Retrying biodata/result capture used by profile + courses phases. */
   private async capturePortalAcademics(
     page: Page,
@@ -673,6 +764,16 @@ export class DeepScrapeProcessor {
           continue;
         }
       }
+    }
+
+    const profileNow = await prisma.discoveredPortalProfile.findUnique({
+      where: { onboardingSessionId },
+    });
+    const gradeRows = await prisma.discoveredAcademicRecord.count({
+      where: { onboardingSessionId },
+    });
+    if (!profileNow || gradeRows === 0) {
+      await this.visionExtract(page, home, onboardingSessionId, userId);
     }
   }
 

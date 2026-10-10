@@ -38,6 +38,22 @@ export const agentEnvSchema = z.object({
     emptyToUndefined,
     z.string().min(1).optional(),
   ),
+  // Gemini key used by the vision fallback. When unset, a Gemini
+  // OPENAI_BASE_URL plus OPENAI_API_KEY is used instead.
+  GEMINI_API_KEY: z.preprocess(emptyToUndefined, z.string().min(1).optional()),
+  GOOGLE_API_KEY: z.preprocess(emptyToUndefined, z.string().min(1).optional()),
+  // Off unless exactly true/1. A session may override via metadata.visionFallbackEnabled.
+  VISION_FALLBACK_ENABLED: z.preprocess(
+    (value) => value === true || value === 'true' || value === '1',
+    z.boolean().default(false),
+  ),
+  VISION_FALLBACK_MODEL: z.preprocess(
+    emptyToUndefined,
+    z.string().min(1).default('gemini-3.8-flash'),
+  ),
+  VISION_FALLBACK_MAX_STEPS: z.coerce.number().default(25),
+  VISION_FALLBACK_TIMEOUT_MS: z.coerce.number().default(180_000),
+  VISION_FALLBACK_TOKEN_BUDGET: z.coerce.number().default(200_000),
   PORTAL_SEARCH_ENDPOINT: z.string().default('https://google.serper.dev/search'),
   BROWSER_MAX_CONTEXTS: z.coerce.number().default(50),
   BROWSER_HEADLESS: z
