@@ -40,9 +40,23 @@ export class FindPortalProcessor {
 
       await this.persistCandidates(onboardingSessionId, candidates);
 
+      // The user may have confirmed a portal while discovery was running.
+      // Only move the session forward if it is still discovering.
+      const current = await prisma.onboardingSession.findUnique({
+        where: { id: onboardingSessionId },
+        select: { stage: true },
+      });
+      if (current?.stage !== OnboardingStage.PORTAL_DISCOVERING) {
+        logger.info(
+          { onboardingSessionId, stage: current?.stage, count: candidates.length },
+          'Portal discovery finished after session moved on; stage left unchanged',
+        );
+        return;
+      }
+
       await recordOnboardingTransition(
         onboardingSessionId,
-        session.stage,
+        current.stage as OnboardingStage,
         OnboardingStage.PORTAL_SUGGESTED,
         {
           candidateCount: candidates.length,
@@ -67,9 +81,20 @@ export class FindPortalProcessor {
       );
     } catch (err) {
       const message = err instanceof Error ? err.message : String(err);
+      const latest = await prisma.onboardingSession.findUnique({
+        where: { id: onboardingSessionId },
+        select: { stage: true },
+      });
+      if (latest?.stage !== OnboardingStage.PORTAL_DISCOVERING) {
+        logger.warn(
+          { onboardingSessionId, stage: latest?.stage, err: message },
+          'Portal discovery failed after session moved on; stage left unchanged',
+        );
+        return;
+      }
       await recordOnboardingTransition(
         onboardingSessionId,
-        session.stage,
+        latest.stage as OnboardingStage,
         OnboardingStage.FAILED,
         { error: message },
         { lastError: { stage: 'PORTAL_DISCOVERING', message } },
