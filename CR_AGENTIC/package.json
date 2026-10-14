@@ -8,7 +8,7 @@
   ],
   "scripts": {
     "build": "yarn workspaces foreach -Apt run build",
-    "build:packages": "yarn workspace @cr-agentic/config build && yarn workspace @cr-agentic/shared build && yarn workspace @cr-agentic/database build && yarn workspace @cr-agentic/agent-core build && yarn workspace @cr-agentic/queue build && yarn workspace @cr-agentic/storage build && yarn workspace @cr-agentic/observability build && yarn workspace @cr-agentic/lms-adapters build && yarn workspace @cr-agentic/portal-discovery build",
+    "build:packages": "yarn workspace @cr-agentic/config build && yarn workspace @cr-agentic/shared build && yarn workspace @cr-agentic/database build && yarn workspace @cr-agentic/agent-core build && yarn workspace @cr-agentic/queue build && yarn workspace @cr-agentic/storage build && yarn workspace @cr-agentic/observability build && yarn workspace @cr-agentic/lms-adapters build && yarn workspace @cr-agentic/portal-discovery build && yarn workspace @cr-agentic/vision-fallback build",
     "dev:agent-api": "yarn workspace @cr-agentic/agent-api start:dev",
     "dev:browser-worker": "yarn workspace @cr-agentic/browser-worker dev",
     "dev:ai-worker": "yarn workspace @cr-agentic/ai-worker dev",

@@ -17,6 +17,7 @@
     "@cr-agentic/queue": "0.1.0",
     "@cr-agentic/shared": "0.1.0",
     "@cr-agentic/storage": "0.1.0",
+    "@cr-agentic/vision-fallback": "0.1.0",
     "@nestjs/common": "^11.0.1",
     "@nestjs/config": "^4.0.0",
     "@nestjs/core": "^11.0.1",

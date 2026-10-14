@@ -59,6 +59,8 @@ services:
       AGENT_DATABASE_URL: postgresql://agent:agent@agent-postgres:5432/cr_agent?schema=public
       REDIS_HOST: agent-redis
       REDIS_PORT: 6379
+      VISION_FALLBACK_ENABLED: ${VISION_FALLBACK_ENABLED:-false}
+      GEMINI_API_KEY: ${GEMINI_API_KEY:-}
     depends_on:
       agent-postgres:
         condition: service_healthy
@@ -100,6 +102,8 @@ services:
       REDIS_HOST: agent-redis
       REDIS_PORT: 6379
       COURSE_REP_API_URL: http://host.docker.internal:3000
+      VISION_FALLBACK_ENABLED: ${VISION_FALLBACK_ENABLED:-false}
+      GEMINI_API_KEY: ${GEMINI_API_KEY:-}
     depends_on:
       agent-postgres:
         condition: service_healthy

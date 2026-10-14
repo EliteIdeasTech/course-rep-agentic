@@ -1,0 +1,12 @@
+{
+  "extends": "../../tsconfig.base.json",
+  "compilerOptions": {
+    "outDir": "/tmp/vision-fallback-test",
+    "rootDir": "src",
+    "lib": ["ES2022", "DOM"],
+    "declaration": false,
+    "declarationMap": false,
+    "sourceMap": false
+  },
+  "include": ["src/**/*"]
+}

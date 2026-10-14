@@ -173,10 +173,49 @@ Notes and constraints:
 
 #### `GET /onboarding/:sessionId/login/status`
 
-Response: `{ "status": "awaiting" | "in_progress" | "captured" | "failed", "stage": "..." }`
+Response: `{ "status": "awaiting" | "in_progress" | "captured" | "failed" | "needs_interactive" | "awaiting_user_input", "visionStatus": "AWAITING_USER_INPUT" | "SESSION_EXPIRED" | null, "stage": "...", "challenge": null | Challenge }`
 
-Poll until `captured` (server validated the session) or `failed` (ask the user
-to retry — re-run `login/start`).
+`awaiting_user_input` means the vision fallback has the portal open and needs the student to type a code. Show the pop-up below, then keep polling.
+
+Poll until `captured` (server validated the session), `failed`, or `needs_interactive` (ask the user to retry — re-run `login/start`). After a challenge lapses, `GET /onboarding/:sessionId` `lastError.code` is `CHALLENGE_TIMEOUT` or `SESSION_EXPIRED`.
+
+### 3b. Vision challenge pop-up (OTP, captcha, security question)
+
+When credential login cannot finish by itself, the vision fallback may pause instead of solving a captcha or guessing a code. Poll `GET /onboarding/:sessionId` or `GET /onboarding/:sessionId/login/status`. While `visionStatus` is `AWAITING_USER_INPUT`, `stage` stays `LOGIN_IN_PROGRESS` (or `DEEP_DISCOVERY` if the pause happens during scrape) and `challenge` is:
+
+```json
+{
+  "id": "uuid",
+  "kind": "otp",
+  "prompt": "Enter the verification code.",
+  "imagePngBase64": "<optional cropped PNG, no data: prefix>",
+  "expiresAt": "2026-10-10T13:33:00.000Z"
+}
+```
+
+`kind` is `otp`, `captcha`, or `security_question`. `prompt` is the text for the pop-up. `imagePngBase64` is set when the page has a captcha image or code widget; decode it and show it above the input. It is omitted when there is nothing to crop. The server does not pause for any other kind.
+
+Show a modal with the prompt, the image when present, and a single text field. Do not send the screenshot or the answer to any other service. The server does not solve captchas.
+
+`POST /onboarding/:sessionId/challenge`
+
+```json
+{ "answer": "482913" }
+```
+
+Response: `{ "status": "accepted", "challengeId": "uuid" }`.
+
+The browser types the answer into the portal field and continues. The answer is not returned, not written to logs, and not sent to the model. A session can pause more than once; each pause has its own `id` and its own 3-minute `expiresAt`. Submit only while that challenge is still the one returned by the status call.
+
+Errors:
+
+| HTTP | Body | Meaning |
+|------|------|---------|
+| 400 | No challenge is waiting for input | Nothing is paused, or the answer was already consumed |
+| 410 | `CHALLENGE_TIMEOUT` | The 3-minute prompt window passed |
+| 410 | `SESSION_EXPIRED` | The onboarding session `expiresAt` has passed |
+
+After a timeout the login status becomes `needs_interactive` and `GET /onboarding/:sessionId` `lastError.code` is `CHALLENGE_TIMEOUT` or `SESSION_EXPIRED`. Ask the student to start login again.
 
 ### 4. Deep academic discovery
 
@@ -231,8 +270,10 @@ Each course includes `selected` and `offered` (the same flag).
 ### Session status (any time)
 
 `GET /onboarding/:sessionId` returns the full status snapshot including `stage`,
-`selectedCandidateId`, `lastError`, `expiresAt`, `isTerminal`, and `demo`
-(`true` when the session was started for an `isDemo` university).
+`selectedCandidateId`, `lastError`, `expiresAt`, `isTerminal`, `demo`
+(`true` when the session was started for an `isDemo` university),
+`visionStatus`, and `challenge`. When `visionStatus` is `AWAITING_USER_INPUT`,
+show the challenge pop-up in section 3b.
 
 `POST /onboarding/:sessionId/cancel` aborts an in-progress onboarding.
 
@@ -241,7 +282,8 @@ Each course includes `selected` and `offered` (the same flag).
 | After | Poll | Until |
 |-------|------|-------|
 | `discover-portal` | `portal-candidates` | non-empty list or `stage == FAILED` |
-| `login/start` + bridge | `login/status` | `captured` or `failed` |
+| `login/start` + bridge | `login/status` | `captured`, `failed`, or `needs_interactive` |
+| `login/credentials` | `login/status` | `captured`, `awaiting_user_input` (show the challenge pop-up, then POST `challenge`), `failed`, or `needs_interactive` |
 | `discover-academics` | `discovery-results` | results populated (courses/records/events) |
 
 Recommended interval: 2–3s with exponential backoff up to ~30s. Onboarding
@@ -254,6 +296,9 @@ sessions expire after 24 hours.
   Never write school passwords to Postgres, S3, or logs.
 - Interactive login-bridge remains for SSO/MFA/captcha. Never send the school
   password to the bridge endpoint — only post-login `storageState`.
+- `POST /onboarding/:sessionId/challenge` sends the student's OTP, captcha
+  text, or security answer once. Do not log that field. The server types it
+  into the portal and does not send it to the model or a captcha-solving service.
 - The bridge token is HMAC-signed and bound to the `sessionId`; treat it as a
   secret and do not log it.
 - Captured sessions are encrypted at rest (AES-256-GCM) in S3 by the server.
