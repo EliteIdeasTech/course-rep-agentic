@@ -13,6 +13,8 @@ const TRANSITIONS: Record<OnboardingStage, OnboardingStage[]> = {
   ],
   [OnboardingStage.PORTAL_DISCOVERING]: [
     OnboardingStage.PORTAL_SUGGESTED,
+    // The user may pick a suggested or typed URL before discovery finishes.
+    OnboardingStage.PORTAL_CONFIRMED,
     OnboardingStage.FAILED,
     OnboardingStage.CANCELLED,
   ],

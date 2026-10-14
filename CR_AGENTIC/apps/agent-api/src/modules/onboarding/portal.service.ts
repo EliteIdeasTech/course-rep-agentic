@@ -89,7 +89,26 @@ export class PortalService {
     const candidate = await prisma.portalCandidate.findFirst({
       where: { id: dto.candidateId, onboardingSessionId: sessionId },
     });
-    if (!candidate) throw new NotFoundException('Portal candidate not found');
+    if (!candidate) {
+      // The app can hold a candidate id from an earlier session for the same
+      // school (e.g. after a restart). Reuse that candidate's URL here.
+      const other = await prisma.portalCandidate.findUnique({
+        where: { id: dto.candidateId },
+        include: { onboardingSession: { select: { universityName: true } } },
+      });
+      if (
+        !other ||
+        other.onboardingSession?.universityName?.trim().toLowerCase() !==
+          session.universityName?.trim().toLowerCase()
+      ) {
+        throw new NotFoundException('Portal candidate not found');
+      }
+      return this.confirmManual(userId, sessionId, {
+        loginUrl: other.loginUrl,
+        lmsType: other.lmsType,
+        portalName: other.portalName ?? undefined,
+      } as ManualPortalRequestDto);
+    }
 
     return this.createAccountAndConfirm(
       userId,
@@ -108,6 +127,7 @@ export class PortalService {
     dto: ManualPortalRequestDto,
   ) {
     const session = await this.onboarding.requireSession(userId, sessionId);
+    this.assertCanConfirm(session.stage);
 
     const candidate = await prisma.portalCandidate.create({
       data: {
@@ -141,11 +161,7 @@ export class PortalService {
     candidateId: string,
   ) {
     const session = await this.onboarding.requireSession(userId, sessionId);
-    if (session.stage !== 'PORTAL_SUGGESTED' && session.stage !== 'PORTAL_DISCOVERING') {
-      throw new BadRequestException(
-        `Cannot confirm portal from stage ${session.stage}`,
-      );
-    }
+    this.assertCanConfirm(session.stage);
 
     const baseUrl = portalBaseFromLoginUrl(loginUrl);
 
@@ -183,5 +199,11 @@ export class PortalService {
     });
 
     return { connectedAccountId: account.id, stage: 'PORTAL_CONFIRMED', loginUrl };
+  }
+
+  private assertCanConfirm(stage: string) {
+    if (stage !== 'PORTAL_SUGGESTED' && stage !== 'PORTAL_DISCOVERING') {
+      throw new BadRequestException(`Cannot confirm portal from stage ${stage}`);
+    }
   }
 }
