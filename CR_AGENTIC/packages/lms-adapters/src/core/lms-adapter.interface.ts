@@ -95,6 +95,31 @@ export interface ILmsAdapter {
     credentials: { username: string; password: string },
     config?: GenericPortalConfig,
   ): Promise<boolean>;
+
+  /**
+   * Like attemptCredentialLogin but explains a failure (wrong password,
+   * captcha, SSO, MFA...) so the student gets a precise next step.
+   */
+  attemptCredentialLoginDetailed?(
+    page: Page,
+    credentials: { username: string; password: string },
+    config?: GenericPortalConfig,
+  ): Promise<CredentialLoginResult>;
+}
+
+export type CredentialLoginBlocker =
+  | 'invalid_credentials'
+  | 'captcha_required'
+  | 'sso_required'
+  | 'mfa_required'
+  | 'login_form_not_found'
+  | 'not_authenticated';
+
+export interface CredentialLoginResult {
+  ok: boolean;
+  reason?: CredentialLoginBlocker;
+  /** Non-secret detail for logs (e.g. which marker matched). */
+  detail?: string;
 }
 
 export interface GenericPortalConfig {

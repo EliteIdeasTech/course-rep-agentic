@@ -38,8 +38,9 @@ export const QUEUE_POLICIES: Record<string, QueuePolicy> = {
   [QUEUE_NAMES.BROWSER_CREDENTIAL_LOGIN]: {
     concurrency: 5,
     defaultJobOptions: {
-      attempts: 2,
-      backoff: { type: 'fixed', delay: 10_000 },
+      // One-shot: credentials are deleted from Redis on first read, so a retry
+      // can only fail (and used to overwrite the real outcome with FAILED).
+      attempts: 1,
       removeOnComplete: 1000,
       removeOnFail: false,
     },
