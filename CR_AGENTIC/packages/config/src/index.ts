@@ -56,7 +56,30 @@ export type AgentEnv = z.infer<typeof agentEnvSchema>;
 export function loadAgentEnv(
   env: NodeJS.ProcessEnv = process.env,
 ): AgentEnv {
-  return agentEnvSchema.parse(env);
+  return agentEnvSchema.parse(applyAiProvider(env));
 }
 
 export const REDIS_KEY_PREFIX = 'cr:agent:';
+
+/**
+ * AI_PROVIDER switch. google (default) leaves OPENAI_* untouched (they point at
+ * Gemini's OpenAI-compatible endpoint). xai swaps in xAI's OpenAI-compatible
+ * API when XAI_API_KEY is set, without touching the stored Google values, so
+ * switching back is just AI_PROVIDER=google plus a restart.
+ */
+export function applyAiProvider(env: NodeJS.ProcessEnv): NodeJS.ProcessEnv {
+  const provider = (env.AI_PROVIDER || 'google').trim().toLowerCase();
+  if (provider !== 'xai' || !env.XAI_API_KEY?.trim()) return env;
+  const light = env.XAI_LIGHT_MODEL?.trim() || 'grok-4.20-0309-non-reasoning';
+  const quality = env.XAI_QUALITY_MODEL?.trim() || 'grok-4.3';
+  const next: NodeJS.ProcessEnv = {
+    ...env,
+    OPENAI_API_KEY: env.XAI_API_KEY.trim(),
+    OPENAI_BASE_URL: env.XAI_BASE_URL?.trim() || 'https://api.x.ai/v1',
+    OPENAI_MODEL: env.XAI_MODEL?.trim() || light,
+    OPENAI_NAV_MODEL: env.XAI_NAV_MODEL?.trim() || quality,
+  };
+  // Workers that read process.env directly see the same values.
+  if (env === process.env) Object.assign(process.env, next);
+  return next;
+}
