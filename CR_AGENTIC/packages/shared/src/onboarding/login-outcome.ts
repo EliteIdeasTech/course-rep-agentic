@@ -13,6 +13,7 @@ export type LoginFailureReason =
   | 'credentials_expired'
   | 'credentials_decrypt_failed'
   | 'credential_login_error'
+  | 'portal_unreachable'
   | 'session_validation_failed'
   | 'needs_interactive_login';
 
@@ -81,6 +82,13 @@ export const LOGIN_OUTCOMES: Record<LoginFailureReason, LoginOutcomeInfo> = {
     message: 'That sign-in attempt timed out. Please enter your portal details again.',
     interactiveRequired: false,
     canRetryCredentials: true,
+  },
+  portal_unreachable: {
+    errorCode: 'PORTAL_UNREACHABLE',
+    message:
+      'We couldn\'t reach your school portal from our servers. Please sign in to your portal yourself in the next screen.',
+    interactiveRequired: true,
+    canRetryCredentials: false,
   },
   credential_login_error: {
     errorCode: 'PORTAL_ERROR',

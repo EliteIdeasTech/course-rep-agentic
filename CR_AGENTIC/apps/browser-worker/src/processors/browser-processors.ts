@@ -292,8 +292,14 @@ export class BrowserProcessors {
           { portalHost, err: message.slice(0, 300), ms: Date.now() - startedAt },
           'credential_login.error',
         );
+        // Network-level failures (portal blocks our server IP, DNS, TLS reset,
+        // timeouts) mean the student must sign in from their own device.
+        const unreachable =
+          /net::ERR_(CONNECTION_(RESET|REFUSED|CLOSED|TIMED_OUT)|NAME_NOT_RESOLVED|ADDRESS_UNREACHABLE|TIMED_OUT|SSL_PROTOCOL_ERROR|CERT_)|page\.goto: Timeout/i.test(
+            message,
+          );
         await this.finishCredentialLogin(sessionId, OnboardingStage.REAUTH_REQUIRED, {
-          reason: 'credential_login_error',
+          reason: unreachable ? 'portal_unreachable' : 'credential_login_error',
           portalHost,
           message: message.slice(0, 300),
         }, log).catch(() => undefined);
