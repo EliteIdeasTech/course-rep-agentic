@@ -8,7 +8,9 @@ import {
   LmsMaterial,
   LmsProfile,
   LmsTimetableSlot,
+  CredentialLoginResult,
 } from '../core/lms-adapter.interface';
+import { detectCaptcha, detectSso, findNewInvalidCredentialText, bodyText } from './login-signals';
 
 const DEFAULT_CONFIG: GenericPortalConfig = {
   selectors: {
@@ -78,9 +80,21 @@ export class GenericPortalAdapter implements ILmsAdapter {
     credentials: { username: string; password: string },
     config: GenericPortalConfig = DEFAULT_CONFIG,
   ): Promise<boolean> {
+    return (await this.attemptCredentialLoginDetailed(page, credentials, config)).ok;
+  }
+
+  async attemptCredentialLoginDetailed(
+    page: Page,
+    credentials: { username: string; password: string },
+    config: GenericPortalConfig = DEFAULT_CONFIG,
+  ): Promise<CredentialLoginResult> {
     const userSel = config.selectors?.username ?? DEFAULT_CONFIG.selectors!.username!;
     const passSel = config.selectors?.password ?? DEFAULT_CONFIG.selectors!.password!;
     const submitSel = config.selectors?.submit ?? DEFAULT_CONFIG.selectors!.submit!;
+
+    // SSO redirect on arrival (Microsoft/Google/CAS/SAML) — no form to fill.
+    const ssoOnArrival = await detectSso(page);
+    if (ssoOnArrival) return { ok: false, reason: 'sso_required', detail: ssoOnArrival };
 
     // If the confirmed login URL already has a form, stay put; otherwise try common paths.
     const passwordProbe = page.locator(passSel).first();
@@ -111,35 +125,74 @@ export class GenericPortalAdapter implements ILmsAdapter {
     try {
       await page.waitForSelector(passSel, { timeout: 15_000 });
     } catch {
-      return false;
+      const sso = await detectSso(page);
+      if (sso) return { ok: false, reason: 'sso_required', detail: sso };
+      return { ok: false, reason: 'login_form_not_found' };
     }
+
+    // Captcha on the login form: we cannot solve it, the student must sign in.
+    const captchaBefore = await detectCaptcha(page);
+    if (captchaBefore) return { ok: false, reason: 'captcha_required', detail: captchaBefore };
 
     const username = page.locator(userSel).first();
     const password = page.locator(passSel).first();
     const submit = page.locator(submitSel).first();
 
     if ((await username.count()) === 0 || (await password.count()) === 0) {
-      return false;
+      return { ok: false, reason: 'login_form_not_found', detail: 'username_field_missing' };
     }
+
+    const bodyBefore = await bodyText(page);
 
     await username.fill(credentials.username);
     await password.fill(credentials.password);
     if ((await submit.count()) > 0) {
-      await submit.click();
+      await submit.click().catch(() => password.press('Enter'));
     } else {
       await password.press('Enter');
     }
     await page.waitForLoadState('domcontentloaded', { timeout: 30_000 }).catch(() => undefined);
+    // Many portals render the error via AJAX after submit.
+    await page.waitForLoadState('networkidle', { timeout: 8_000 }).catch(() => undefined);
+    await page.waitForTimeout(1500);
 
     const url = page.url().toLowerCase();
-    if (
-      /mfa|sso|oauth|captcha|challenge|verify|2fa|otp/.test(url) ||
-      (await page.locator('iframe[src*="captcha"], .g-recaptcha, [data-sitekey]').count()) > 0
-    ) {
-      return false;
+    const ssoAfter = await detectSso(page);
+    if (ssoAfter) return { ok: false, reason: 'sso_required', detail: ssoAfter };
+    if (/mfa|2fa|otp|two-factor|twofactor/.test(url)) {
+      return { ok: false, reason: 'mfa_required', detail: 'url' };
+    }
+    if (/captcha|challenge/.test(url)) {
+      return { ok: false, reason: 'captcha_required', detail: 'url' };
     }
 
-    return this.validateSession(page, config);
+    const passwordStillVisible = await page
+      .locator(passSel)
+      .first()
+      .isVisible()
+      .catch(() => false);
+    const bodyAfter = await bodyText(page);
+    const invalid = findNewInvalidCredentialText(bodyBefore, bodyAfter);
+    if (invalid && passwordStillVisible) {
+      return { ok: false, reason: 'invalid_credentials', detail: invalid };
+    }
+
+    const captchaAfter = await detectCaptcha(page);
+    if (captchaAfter && passwordStillVisible) {
+      return { ok: false, reason: 'captcha_required', detail: `after_submit:${captchaAfter}` };
+    }
+    if (/verification code|one-time (pass)?code|authenticator app/i.test(bodyAfter) &&
+        !/verification code|one-time (pass)?code|authenticator app/i.test(bodyBefore)) {
+      return { ok: false, reason: 'mfa_required', detail: 'text' };
+    }
+
+    if (await this.validateSession(page, config)) return { ok: true };
+    if (invalid) return { ok: false, reason: 'invalid_credentials', detail: invalid };
+    return {
+      ok: false,
+      reason: 'not_authenticated',
+      detail: passwordStillVisible ? 'password_field_still_visible' : 'no_auth_marker',
+    };
   }
 
   async listCourses(

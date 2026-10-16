@@ -1,4 +1,4 @@
-import { Job } from 'bullmq';
+import { Job, UnrecoverableError } from 'bullmq';
 import { prisma, OnboardingStage, recordOnboardingTransition, recordSuccessfulPortalLogin } from '@cr-agentic/database';
 import { createLogger, writeAuditLog, metrics, startSpan } from '@cr-agentic/observability';
 import { UserLock, LmsRateLimiter, moveToDlq, enqueueJob } from '@cr-agentic/queue';
@@ -145,30 +145,46 @@ export class BrowserProcessors {
 
   /**
    * Server-side username/password login. Credentials are read once from Redis
-   * (encrypted), used to fill the portal form, then deleted. On MFA/SSO/captcha
-   * the onboarding session flips to REAUTH_REQUIRED for interactive fallback.
+   * (encrypted), used to fill the portal form, then deleted. Outcomes:
+   *  - success -> SESSION_CAPTURED
+   *  - wrong password -> REAUTH_REQUIRED, reason invalid_credentials (student re-enters)
+   *  - captcha / SSO / MFA -> REAUTH_REQUIRED with that reason (student signs in in-app)
+   * This job is never retried: the credentials are gone after the first read.
    */
   async processCredentialLogin(job: Job<BrowserCredentialLoginJob>) {
     const lock = new UserLock(this.redis);
     return lock.withLock(job.data.userId, async () => {
       const { controller, env } = this.stack;
+      const sessionId = job.data.onboardingSessionId;
+      const log = logger.child({
+        onboardingSessionId: sessionId,
+        connectedAccountId: job.data.connectedAccountId,
+        jobId: job.id,
+        attempt: (job.attemptsMade ?? 0) + 1,
+      });
+      const startedAt = Date.now();
+      log.info('credential_login.start');
+
       const account = await prisma.connectedAccount.findUnique({
         where: { id: job.data.connectedAccountId },
       });
-      if (!account) throw new Error('Connected account missing');
+      if (!account) {
+        log.warn('credential_login.account_missing');
+        throw new UnrecoverableError('Connected account missing');
+      }
 
       const encryptedB64 = await this.redis.get(job.data.credentialsRedisKey);
       // Always delete — even on failure — so passwords never linger.
       await this.redis.del(job.data.credentialsRedisKey).catch(() => undefined);
 
       if (!encryptedB64) {
-        await recordOnboardingTransition(
-          job.data.onboardingSessionId,
-          OnboardingStage.LOGIN_IN_PROGRESS,
-          OnboardingStage.FAILED,
-          { reason: 'credentials_expired' },
-        );
-        throw new Error('Credentials expired or missing');
+        // A redelivered/retried job after the credentials were consumed or
+        // expired. Never overwrite whatever outcome the first run recorded.
+        log.warn('credential_login.credentials_missing');
+        await this.finishCredentialLogin(sessionId, OnboardingStage.REAUTH_REQUIRED, {
+          reason: 'credentials_expired',
+        }, log);
+        return;
       }
 
       const crypto = new SessionCrypto(env.SESSION_ENCRYPTION_KEY);
@@ -176,50 +192,64 @@ export class BrowserProcessors {
       try {
         credentials = crypto.decryptJson(Buffer.from(encryptedB64, 'base64'));
       } catch {
-        await recordOnboardingTransition(
-          job.data.onboardingSessionId,
-          OnboardingStage.LOGIN_IN_PROGRESS,
-          OnboardingStage.FAILED,
-          { reason: 'credentials_decrypt_failed' },
-        );
-        throw new Error('Failed to decrypt credentials');
+        log.warn('credential_login.decrypt_failed');
+        await this.finishCredentialLogin(sessionId, OnboardingStage.REAUTH_REQUIRED, {
+          reason: 'credentials_decrypt_failed',
+        }, log);
+        return;
       }
 
       const config = await this.loadAdapterConfig(account.universityId, account.lmsType);
       const adapter = this.adapter(account.lmsType);
       const context = await controller.createContext();
       const page = await context.newPage();
+      let portalHost = '';
 
       try {
         const candidate = account.portalCandidateId
           ? await prisma.portalCandidate.findUnique({ where: { id: account.portalCandidateId } })
           : null;
         const targetUrl = candidate?.loginUrl || adapter.loginUrl(account.lmsBaseUrl);
+        try {
+          portalHost = new URL(targetUrl).host;
+        } catch {
+          portalHost = 'invalid-url';
+        }
+        log.info({ portalHost, lmsType: account.lmsType }, 'credential_login.navigate');
         await page.goto(targetUrl, {
           waitUntil: 'domcontentloaded',
           timeout: 60_000,
         });
 
-        const attempt = adapter.attemptCredentialLogin
-          ? await adapter.attemptCredentialLogin(page, credentials, config)
-          : false;
+        const result = adapter.attemptCredentialLoginDetailed
+          ? await adapter.attemptCredentialLoginDetailed(page, credentials, config)
+          : {
+              ok: adapter.attemptCredentialLogin
+                ? await adapter.attemptCredentialLogin(page, credentials, config)
+                : false,
+              reason: 'not_authenticated' as const,
+            };
 
         // Zero out local copy
         credentials.password = '';
         credentials.username = '';
 
-        if (!attempt) {
+        if (!result.ok) {
+          const reason = result.reason ?? 'not_authenticated';
+          log.info(
+            { portalHost, reason, detail: result.detail, ms: Date.now() - startedAt },
+            'credential_login.blocked',
+          );
           await prisma.connectedAccount.update({
             where: { id: account.id },
             data: { status: 'REAUTH_REQUIRED' },
           });
-          await recordOnboardingTransition(
-            job.data.onboardingSessionId,
-            OnboardingStage.LOGIN_IN_PROGRESS,
-            OnboardingStage.REAUTH_REQUIRED,
-            { reason: 'needs_interactive_login' },
-          );
-          metrics.increment('browser.credential_login.needs_interactive');
+          await this.finishCredentialLogin(sessionId, OnboardingStage.REAUTH_REQUIRED, {
+            reason,
+            portalHost,
+            ...(result.detail ? { signal: result.detail } : {}),
+          }, log);
+          metrics.increment(`browser.credential_login.${reason}`);
           return;
         }
 
@@ -237,14 +267,11 @@ export class BrowserProcessors {
           where: { id: account.id },
           data: { status: 'ACTIVE' },
         });
-        await recordOnboardingTransition(
-          job.data.onboardingSessionId,
-          OnboardingStage.LOGIN_IN_PROGRESS,
-          OnboardingStage.SESSION_CAPTURED,
-        );
+        await this.finishCredentialLogin(sessionId, OnboardingStage.SESSION_CAPTURED, undefined, log);
+        log.info({ portalHost, ms: Date.now() - startedAt }, 'credential_login.captured');
 
         await this.rememberSuccessfulPortalLogin({
-          onboardingSessionId: job.data.onboardingSessionId,
+          onboardingSessionId: sessionId,
           universityId: account.universityId,
           loginUrl: targetUrl,
           lmsType: account.lmsType,
@@ -258,21 +285,51 @@ export class BrowserProcessors {
           resourceId: account.id,
         });
       } catch (err) {
-        await recordOnboardingTransition(
-          job.data.onboardingSessionId,
-          OnboardingStage.LOGIN_IN_PROGRESS,
-          OnboardingStage.REAUTH_REQUIRED,
-          {
-            reason: 'credential_login_error',
-            message: err instanceof Error ? err.message : String(err),
-          },
-        ).catch(() => undefined);
+        credentials.password = '';
+        credentials.username = '';
+        const message = err instanceof Error ? err.message : String(err);
+        log.warn(
+          { portalHost, err: message.slice(0, 300), ms: Date.now() - startedAt },
+          'credential_login.error',
+        );
+        await this.finishCredentialLogin(sessionId, OnboardingStage.REAUTH_REQUIRED, {
+          reason: 'credential_login_error',
+          portalHost,
+          message: message.slice(0, 300),
+        }, log).catch(() => undefined);
         metrics.increment('browser.credential_login.failure');
-        throw err;
+        // Credentials are already deleted: a retry can only fail. Do not retry.
+        throw new UnrecoverableError(message);
       } finally {
         await controller.releaseContext(context);
       }
     });
+  }
+
+  /**
+   * Moves a credential-login session out of LOGIN_IN_PROGRESS. If the session
+   * already moved on (cancelled, a previous run recorded an outcome, student
+   * restarted), leave it alone so a late or duplicate job cannot clobber it.
+   */
+  private async finishCredentialLogin(
+    sessionId: string,
+    to: OnboardingStage,
+    detail: Record<string, unknown> | undefined,
+    log: { info: (o: object, m: string) => void },
+  ) {
+    const current = await prisma.onboardingSession.findUnique({
+      where: { id: sessionId },
+      select: { stage: true },
+    });
+    if (!current || current.stage !== OnboardingStage.LOGIN_IN_PROGRESS) {
+      log.info(
+        { from: current?.stage ?? null, to, reason: detail?.reason },
+        'credential_login.transition_skipped',
+      );
+      return;
+    }
+    await recordOnboardingTransition(sessionId, OnboardingStage.LOGIN_IN_PROGRESS, to, detail);
+    log.info({ to, reason: detail?.reason }, 'credential_login.transition');
   }
 
   /**

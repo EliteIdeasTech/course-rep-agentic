@@ -5,7 +5,12 @@ import Redis from 'ioredis';
 import { randomUUID } from 'crypto';
 import { prisma, OnboardingStage } from '@cr-agentic/database';
 import { enqueueJob } from '@cr-agentic/queue';
-import { QUEUE_NAMES } from '@cr-agentic/shared';
+import {
+  QUEUE_NAMES,
+  loginOutcomeFor,
+  CREDENTIAL_LOGIN_MAX_ATTEMPTS,
+  CREDENTIAL_LOGIN_ATTEMPT_WINDOW_SEC,
+} from '@cr-agentic/shared';
 import type { BrowserCredentialLoginJob } from '@cr-agentic/shared';
 import { SessionCrypto } from '@cr-agentic/storage';
 import { writeAuditLog } from '@cr-agentic/observability';
@@ -36,6 +41,7 @@ import {
 const BROWSER_SESSION_TTL_MS = 30 * 24 * 60 * 60 * 1000;
 const CREDENTIALS_TTL_SEC = 300;
 const CREDENTIALS_KEY_PREFIX = 'cr:agent:creds:';
+const CREDENTIAL_ATTEMPTS_KEY_PREFIX = 'cr:agent:cred-attempts:';
 
 @Injectable()
 export class LoginService {
@@ -89,11 +95,47 @@ export class LoginService {
     };
   }
 
-  status(userId: string, sessionId: string) {
-    return this.onboarding.requireSession(userId, sessionId).then((session) => ({
-      status: this.mapStatus(session.stage),
-      stage: session.stage,
-    }));
+  async status(userId: string, sessionId: string) {
+    const session = await this.onboarding.requireSession(userId, sessionId);
+    return this.describeLoginState(session.id, session.stage);
+  }
+
+  /**
+   * Status + (for REAUTH_REQUIRED / FAILED) the reason recorded by the browser
+   * worker, so clients can tell "wrong password" from "captcha, sign in
+   * yourself". A wrong password is reported as status `failed` (older apps
+   * already show "check your credentials" for that) but the stage stays
+   * REAUTH_REQUIRED so the student can resubmit.
+   */
+  private async describeLoginState(sessionId: string, stage: string) {
+    const base = { status: this.mapStatus(stage), stage } as {
+      status: ReturnType<LoginService['mapStatus']>;
+      stage: string;
+      reason?: string;
+      errorCode?: string;
+      message?: string;
+      interactiveRequired?: boolean;
+      canRetryCredentials?: boolean;
+    };
+    if (stage !== 'REAUTH_REQUIRED' && stage !== 'FAILED') return base;
+
+    const event = await prisma.onboardingAuditEvent.findFirst({
+      where: { onboardingSessionId: sessionId, toStage: stage as OnboardingStage },
+      orderBy: { createdAt: 'desc' },
+      select: { detail: true },
+    });
+    const reason = (event?.detail as { reason?: unknown } | null)?.reason;
+    const info = loginOutcomeFor(reason);
+    if (!info) return base;
+    return {
+      ...base,
+      status: reason === 'invalid_credentials' ? ('failed' as const) : base.status,
+      reason: reason as string,
+      errorCode: info.errorCode,
+      message: info.message,
+      interactiveRequired: info.interactiveRequired,
+      canRetryCredentials: info.canRetryCredentials,
+    };
   }
 
   /**
@@ -118,6 +160,20 @@ export class LoginService {
       orderBy: { createdAt: 'desc' },
     });
     if (!account) throw new BadRequestException('No connected account to attach session');
+
+    // Cap credential submissions per session so a stuck client (or someone
+    // guessing passwords against a school portal) cannot loop forever.
+    const attemptsKey = `${CREDENTIAL_ATTEMPTS_KEY_PREFIX}${sessionId}`;
+    const attempts = await this.redis.incr(attemptsKey);
+    if (attempts === 1) {
+      await this.redis.expire(attemptsKey, CREDENTIAL_LOGIN_ATTEMPT_WINDOW_SEC);
+    }
+    if (attempts > CREDENTIAL_LOGIN_MAX_ATTEMPTS) {
+      throw new HttpException(
+        'Too many sign-in attempts for this portal. Wait an hour, or sign in to your portal yourself.',
+        HttpStatus.TOO_MANY_REQUESTS,
+      );
+    }
 
     const credentialsRedisKey = `${CREDENTIALS_KEY_PREFIX}${sessionId}:${randomUUID()}`;
     const encrypted = this.crypto
@@ -431,7 +487,7 @@ export class LoginService {
 
   async complete(userId: string, sessionId: string) {
     const session = await this.onboarding.requireSession(userId, sessionId);
-    return { status: this.mapStatus(session.stage), stage: session.stage };
+    return this.describeLoginState(session.id, session.stage);
   }
 
   /** Resolve session owner from JWT userId or guest token. */
