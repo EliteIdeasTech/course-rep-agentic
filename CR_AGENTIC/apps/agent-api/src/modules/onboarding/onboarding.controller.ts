@@ -171,9 +171,14 @@ export class OnboardingController {
     @CurrentUser('id') userId: string | undefined,
     @Param('sessionId') sessionId: string,
     @Headers('x-onboarding-guest-token') guestToken?: string,
+    @Headers('authorization') authorization?: string,
   ) {
     const actor = await this.login.resolveActor(sessionId, userId, guestToken);
-    return this.login.claimIdentity(actor, sessionId);
+    const bearer =
+      userId && userId === actor && /^Bearer\s+/i.test(authorization ?? '')
+        ? authorization!.replace(/^Bearer\s+/i, '').trim()
+        : undefined;
+    return this.login.claimIdentity(actor, sessionId, bearer);
   }
 
   // Public: authenticated by the one-time HMAC bridge token, not JWT.
