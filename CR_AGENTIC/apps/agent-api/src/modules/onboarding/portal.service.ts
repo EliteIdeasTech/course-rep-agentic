@@ -7,7 +7,12 @@ import {
 import Redis from 'ioredis';
 import { prisma, LmsType as PrismaLmsType } from '@cr-agentic/database';
 import { enqueueJob } from '@cr-agentic/queue';
-import { QUEUE_NAMES, PortalCandidateView } from '@cr-agentic/shared';
+import {
+  QUEUE_NAMES,
+  PortalCandidateView,
+  normalizePortalUrl,
+  portalMatchKey,
+} from '@cr-agentic/shared';
 import type { DiscoveryFindPortalJob } from '@cr-agentic/shared';
 import { writeAuditLog } from '@cr-agentic/observability';
 import { REDIS_CLIENT } from '../queue/queue.module';
@@ -18,9 +23,11 @@ import {
 } from './dto/onboarding.request.dto';
 import { sessionIsDemo } from './reviewer-demo';
 
+const REACH_TIMEOUT_MS = 6_000;
+
 /** Keep path prefixes like /portalplus/ instead of collapsing to origin-only. */
 export function portalBaseFromLoginUrl(loginUrl: string): string {
-  const u = new URL(loginUrl);
+  const u = new URL(normalizePortalUrl(loginUrl) ?? loginUrl);
   let path = u.pathname || '/';
   path = path.replace(/\/login\/?$/i, '/');
   const last = path.split('/').filter(Boolean).pop() ?? '';
@@ -43,6 +50,14 @@ export class PortalService {
     const session = await this.onboarding.requireSession(userId, sessionId);
     if (sessionIsDemo(session.metadata)) {
       throw new BadRequestException('Portal discovery is not used for this session');
+    }
+
+    // The app can call this twice (screen bootstrap + start flow). A second
+    // job used to replace every candidate with new ids while the app still
+    // held the old ones, so the student's pick failed with "Portal candidate
+    // not found". One discovery run per session is enough.
+    if (session.stage === 'PORTAL_DISCOVERING') {
+      return { stage: 'PORTAL_DISCOVERING' };
     }
 
     await this.onboarding.transition(sessionId, session.stage, 'PORTAL_DISCOVERING');
@@ -101,7 +116,17 @@ export class PortalService {
         other.onboardingSession?.universityName?.trim().toLowerCase() !==
           session.universityName?.trim().toLowerCase()
       ) {
-        throw new NotFoundException('Portal candidate not found');
+        // Stale id (e.g. candidates refreshed by a second discovery run). If
+        // the client also sent the URL it was showing, use that instead.
+        if (dto.loginUrl) {
+          return this.confirmManual(userId, sessionId, {
+            loginUrl: dto.loginUrl,
+            lmsType: 'GENERIC',
+          } as ManualPortalRequestDto);
+        }
+        throw new NotFoundException(
+          'That portal option has expired. Pick it again or type the portal address.',
+        );
       }
       return this.confirmManual(userId, sessionId, {
         loginUrl: other.loginUrl,
@@ -129,12 +154,39 @@ export class PortalService {
     const session = await this.onboarding.requireSession(userId, sessionId);
     this.assertCanConfirm(session.stage);
 
+    const normalized = normalizePortalUrl(dto.loginUrl);
+    if (!normalized) {
+      throw new BadRequestException(
+        'That does not look like a web address. Try something like portal.yourschool.edu',
+      );
+    }
+
+    // Typed URL that points at a portal we already suggested: confirm that
+    // candidate (keeps its LMS type and name) instead of adding a duplicate.
+    const key = portalMatchKey(normalized);
+    const existing = await prisma.portalCandidate.findMany({
+      where: { onboardingSessionId: sessionId },
+      orderBy: { confidence: 'desc' },
+    });
+    const match = existing.find((c) => portalMatchKey(c.loginUrl) === key);
+    if (match) {
+      return this.createAccountAndConfirm(
+        userId,
+        sessionId,
+        session.universityId,
+        match.loginUrl,
+        match.lmsType,
+        match.id,
+      );
+    }
+
+    const loginUrl = await this.preferReachableScheme(normalized);
     const candidate = await prisma.portalCandidate.create({
       data: {
         onboardingSessionId: sessionId,
-        loginUrl: dto.loginUrl,
+        loginUrl,
         portalName: dto.portalName,
-        lmsType: dto.lmsType as PrismaLmsType,
+        lmsType: (dto.lmsType ?? 'GENERIC') as PrismaLmsType,
         confidence: 1,
         evidence: ['user supplied'],
         source: 'MANUAL',
@@ -146,10 +198,47 @@ export class PortalService {
       userId,
       sessionId,
       session.universityId,
-      dto.loginUrl,
-      dto.lmsType as PrismaLmsType,
+      loginUrl,
+      (dto.lmsType ?? 'GENERIC') as PrismaLmsType,
       candidate.id,
     );
+  }
+
+  /**
+   * https first. If it does not answer from our server but plain http does,
+   * use http. If neither answers (some portals block our server), keep https
+   * and let the login step report it.
+   */
+  private async preferReachableScheme(url: string): Promise<string> {
+    if (!url.startsWith('https://')) {
+      if (await this.reachable(url.replace(/^http:/, 'https:'))) {
+        return url.replace(/^http:/, 'https:');
+      }
+      return url;
+    }
+    if (await this.reachable(url)) return url;
+    const http = url.replace(/^https:/, 'http:');
+    if (await this.reachable(http)) return http;
+    return url;
+  }
+
+  private async reachable(url: string): Promise<boolean> {
+    const controller = new AbortController();
+    const timer = setTimeout(() => controller.abort(), REACH_TIMEOUT_MS);
+    try {
+      const res = await fetch(url, {
+        method: 'GET',
+        redirect: 'manual', // a 3xx counts as reachable; never follow into other hosts
+        signal: controller.signal,
+        headers: { 'User-Agent': 'Mozilla/5.0 (CourseRep portal check)' },
+      });
+      res.body?.cancel().catch(() => undefined);
+      return res.status < 500;
+    } catch {
+      return false;
+    } finally {
+      clearTimeout(timer);
+    }
   }
 
   private async createAccountAndConfirm(

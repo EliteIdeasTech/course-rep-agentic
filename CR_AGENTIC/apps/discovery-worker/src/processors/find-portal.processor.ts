@@ -6,7 +6,7 @@ import {
 } from '@cr-agentic/database';
 import { createLogger, writeAuditLog } from '@cr-agentic/observability';
 import { PortalDiscoveryService, PortalCandidateResult } from '@cr-agentic/portal-discovery';
-import { LmsType } from '@cr-agentic/shared';
+import { LmsType, portalMatchKey } from '@cr-agentic/shared';
 import type { DiscoveryFindPortalJob } from '@cr-agentic/shared';
 
 
@@ -137,22 +137,59 @@ export class FindPortalProcessor {
     return [head, ...rest];
   }
 
+  /**
+   * Upsert by portal URL so candidate ids stay stable across discovery runs.
+   * Clients hold these ids; replacing every row on a rerun made a student's
+   * pick fail with "Portal candidate not found". Manual and selected rows are
+   * never removed; web-search rows that are no longer suggested are.
+   */
   private async persistCandidates(
     onboardingSessionId: string,
     candidates: PortalCandidateResult[],
   ): Promise<void> {
-    await prisma.portalCandidate.deleteMany({ where: { onboardingSessionId } });
-    if (candidates.length === 0) return;
-    await prisma.portalCandidate.createMany({
-      data: candidates.map((c) => ({
-        onboardingSessionId,
-        loginUrl: c.loginUrl,
-        portalName: c.portalName,
-        lmsType: c.lmsType,
-        confidence: c.confidence,
-        evidence: c.evidence,
-        source: 'WEB_SEARCH' as const,
-      })),
-    });
+    const keyOf = (url: string) => portalMatchKey(url) ?? url.trim().toLowerCase();
+    const existing = await prisma.portalCandidate.findMany({ where: { onboardingSessionId } });
+    const byKey = new Map(existing.map((row) => [keyOf(row.loginUrl), row]));
+    const keep = new Set<string>();
+
+    for (const c of candidates) {
+      const key = keyOf(c.loginUrl);
+      if (keep.has(key)) continue;
+      keep.add(key);
+      const row = byKey.get(key);
+      if (row) {
+        if (row.source === 'MANUAL') continue;
+        await prisma.portalCandidate.update({
+          where: { id: row.id },
+          data: {
+            portalName: c.portalName,
+            lmsType: c.lmsType,
+            confidence: c.confidence,
+            evidence: c.evidence,
+          },
+        });
+        continue;
+      }
+      await prisma.portalCandidate.create({
+        data: {
+          onboardingSessionId,
+          loginUrl: c.loginUrl,
+          portalName: c.portalName,
+          lmsType: c.lmsType,
+          confidence: c.confidence,
+          evidence: c.evidence,
+          source: 'WEB_SEARCH' as const,
+        },
+      });
+    }
+
+    const stale = existing
+      .filter((row) => row.source !== 'MANUAL' && !row.selected && !keep.has(keyOf(row.loginUrl)))
+      .map((row) => row.id);
+    if (stale.length > 0) {
+      await prisma.portalCandidate
+        .deleteMany({ where: { id: { in: stale } } })
+        .catch((err) => logger.warn({ onboardingSessionId, err: String(err) }, 'stale candidate cleanup failed'));
+    }
   }
 }

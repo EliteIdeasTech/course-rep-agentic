@@ -5,7 +5,7 @@ import {
   IsOptional,
   IsString,
   IsUUID,
-  IsUrl,
+  MaxLength,
   ValidateIf,
   ValidateNested,
 } from 'class-validator';
@@ -53,16 +53,31 @@ export class ConfirmPortalRequestDto {
   @ApiProperty()
   @IsUUID()
   candidateId!: string;
+
+  @ApiPropertyOptional({
+    description:
+      'URL the client showed for this candidate. Used if the id is stale. Scheme optional.',
+  })
+  @IsOptional()
+  @IsString()
+  @MaxLength(2048)
+  loginUrl?: string;
 }
 
 export class ManualPortalRequestDto {
-  @ApiProperty()
-  @IsUrl({ require_tld: false })
+  @ApiProperty({
+    description:
+      'Portal address as typed. https:// is added when missing; spaces are removed. ' +
+      'Validated after normalisation in PortalService.',
+  })
+  @IsString()
+  @MaxLength(2048)
   loginUrl!: string;
 
-  @ApiProperty({ enum: LmsType })
+  @ApiPropertyOptional({ enum: LmsType })
+  @IsOptional()
   @IsEnum(LmsType)
-  lmsType!: LmsType;
+  lmsType?: LmsType;
 
   @ApiPropertyOptional()
   @IsOptional()
