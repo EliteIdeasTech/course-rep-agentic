@@ -3,7 +3,11 @@ import { prisma } from '@cr-agentic/database';
 import { writeAuditLog } from '@cr-agentic/observability';
 import { orderDiscoveredCourses } from '../../integrations/course-rep/course-offering.selection';
 import { CourseRepClient } from '../../integrations/course-rep/course-rep.client';
-import { toAgentImportCourses } from '../../integrations/course-rep/import-courses.payload';
+import {
+  gradesFromAcademicRecords,
+  latestCumulativeGpa,
+  toAgentImportCourses,
+} from '../../integrations/course-rep/import-courses.payload';
 import { CourseImportSelectionDto } from './dto/onboarding.request.dto';
 import { DeepDiscoveryService } from './deep-discovery.service';
 import { OnboardingService } from './onboarding.service';
@@ -53,7 +57,16 @@ export class SyncService {
       where: { onboardingSessionId: sessionId, selected: true },
     });
 
-    const importCourses = toAgentImportCourses(courses);
+    const academicRecords = await prisma.discoveredAcademicRecord.findMany({
+      where: { onboardingSessionId: sessionId },
+      select: { courseGrades: true, cumulativeGpa: true, createdAt: true },
+    });
+    const importCourses = toAgentImportCourses(
+      courses,
+      gradesFromAcademicRecords(academicRecords),
+    );
+    const cumulativeGpa = latestCumulativeGpa(academicRecords);
+    const gradedCourses = importCourses.filter((course) => course.grade).length;
     const offeredCourses = importCourses.filter((course) => course.offered).length;
     const unofferedCourses = importCourses.length - offeredCourses;
     let importedCourses = 0;
@@ -64,12 +77,13 @@ export class SyncService {
         result = await this.courseRep.importCourses({
           userId,
           courses: importCourses,
+          ...(cumulativeGpa !== undefined ? { cumulativeGpa } : {}),
         });
       } catch (err) {
         const msg = err instanceof Error ? err.message : 'Course import failed';
         throw new BadGatewayException(msg);
       }
-      importedCourses = result.imported;
+      importedCourses = result?.imported ?? importCourses.length;
 
       await prisma.discoveredCourse.updateMany({
         where: { onboardingSessionId: sessionId },
@@ -208,6 +222,8 @@ export class SyncService {
         discoveredCourses: importCourses.length,
         offeredCourses,
         unofferedCourses,
+        gradedCourses,
+        cumulativeGpaSent: cumulativeGpa !== undefined,
         syncedAssignments,
         syncedTimetable,
         syncedEvents,

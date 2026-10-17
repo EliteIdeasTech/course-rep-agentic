@@ -303,16 +303,32 @@ export class LoginService {
    * After SESSION_CAPTURED (and ideally profile scrape), upsert a Course Rep
    * user from the portal profile and issue a JWT. Remaps guest sessions.
    */
-  async claimIdentity(userId: string, sessionId: string) {
+  async claimIdentity(userId: string, sessionId: string, bearerToken?: string) {
     const session = await this.onboarding.requireSession(userId, sessionId);
     const profile = await prisma.discoveredPortalProfile.findUnique({
       where: { onboardingSessionId: sessionId },
     });
 
+    // A signed-in student linking their portal must stay on their own Course
+    // Rep account. Upserting by the portal email (or a placeholder) would
+    // create a second account and switch the app to it, so we key the upsert
+    // on the existing account's email and only fill in school details.
+    const isGuest = (session.metadata as { isGuest?: boolean } | null)?.isGuest === true;
+    let existingEmail: string | undefined;
+    if (!isGuest) {
+      try {
+        existingEmail = (await this.courseRep.getUser(userId))?.email?.trim() || undefined;
+      } catch {
+        existingEmail = undefined;
+      }
+    }
+
     const email =
+      existingEmail ||
       profile?.email ||
       `portal-${sessionId.slice(0, 8)}@students.courserep.local`;
-    const displayName = profile?.displayName ?? undefined;
+    // Don't overwrite a signed-in user's chosen name with the portal's.
+    const displayName = existingEmail ? undefined : profile?.displayName ?? undefined;
 
     let upserted;
     try {
@@ -331,7 +347,10 @@ export class LoginService {
       throw new BadGatewayException(msg);
     }
 
-    const realUserId = upserted.userId;
+    const realUserId = upserted?.userId;
+    if (!realUserId) {
+      throw new BadGatewayException('Course Rep identity upsert returned no user');
+    }
 
     // Remap all agent rows from guest/provisional userId → real userId.
     if (realUserId !== userId) {
@@ -379,7 +398,9 @@ export class LoginService {
       ]);
     }
 
-    const accessToken = await this.jwtService.signAsync({
+    const reuseBearer =
+      !isGuest && realUserId === userId && bearerToken ? bearerToken : undefined;
+    const accessToken = reuseBearer ?? await this.jwtService.signAsync({
       sub: realUserId,
       email: upserted.email,
       username: upserted.username ?? upserted.email,

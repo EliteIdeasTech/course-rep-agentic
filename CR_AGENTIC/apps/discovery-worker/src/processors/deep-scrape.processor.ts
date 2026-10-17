@@ -51,6 +51,8 @@ type ScrapedCourse = {
   units?: number;
   semester?: string;
   url?: string;
+  /** false = keep as an unoffered (past) course. Omitted means offered. */
+  selected?: boolean;
 };
 
 type ScrapedAssignment = {
@@ -75,6 +77,25 @@ type ScrapedSlot = {
 };
 
 type LearnedStore = Record<string, Partial<Record<AgentGoalName, LearnedPath>>>;
+
+type ResultCourseRow = {
+  code: string;
+  title: string;
+  units?: number;
+  grade?: string;
+};
+
+/** One semester row from a portal results page, oldest first once sorted. */
+type ResultRow = {
+  session: string;
+  semester: string;
+  level: string;
+  cgpa: string;
+  gpa: string;
+  courses?: ResultCourseRow[];
+};
+
+const MAX_RESULT_STATEMENTS = 16;
 
 export class DeepScrapeProcessor {
   private readonly registry = new LmsAdapterRegistry();
@@ -310,6 +331,26 @@ export class DeepScrapeProcessor {
       finalCourses = await this.runAgent(page, account, home, this.courseGoal(), onboardingSessionId, userId);
     }
 
+    // Students who are not registered this session (graduated, unpaid fees,
+    // registration closed) have no current course form, but their result
+    // statements still list every course unit they took. Use those, offering
+    // only the most recent semester.
+    let fromResults = false;
+    if (finalCourses.length === 0) {
+      finalCourses = await this.coursesFromResults(onboardingSessionId);
+      fromResults = finalCourses.length > 0;
+      if (fromResults) {
+        logger.info(
+          {
+            onboardingSessionId,
+            count: finalCourses.length,
+            offered: finalCourses.filter((c) => c.selected !== false).length,
+          },
+          'No current course list; using courses from result statements',
+        );
+      }
+    }
+
     const seenCourses = new Set<string>();
     for (const course of finalCourses) {
       const key = `${(course.code ?? '').toLowerCase()}::${course.title.toLowerCase()}`;
@@ -324,10 +365,11 @@ export class DeepScrapeProcessor {
           title: course.title,
           units: course.units,
           semester: course.semester,
+          ...(course.selected === false ? { selected: false } : {}),
         },
       });
     }
-    logger.info({ onboardingSessionId, count: seenCourses.size, home }, 'Scraped courses');
+    logger.info({ onboardingSessionId, count: seenCourses.size, home, fromResults }, 'Scraped courses');
 
     // Prefer structured signals we already extracted (e.g. programme:<matric>).
     for (const course of courses) {
@@ -599,8 +641,11 @@ export class DeepScrapeProcessor {
       where: { onboardingSessionId },
     });
 
-    if (!existing) {
-      for (const pg of ['home', 'biodata'] as const) {
+    // A dashboard often yields only name + matric. Keep reading profile pages
+    // until we also have department and level, which the main API needs to
+    // attach imported courses to the student.
+    if (!profileComplete(existing)) {
+      for (const pg of ['home', 'biodata', 'profile'] as const) {
         try {
           await page.goto(this.portalPage(home, pg), {
             waitUntil: 'domcontentloaded',
@@ -617,7 +662,12 @@ export class DeepScrapeProcessor {
             userId,
             `capture:${pg}`,
           );
-          if (ok) break;
+          if (ok) {
+            const now = await prisma.discoveredPortalProfile.findUnique({
+              where: { onboardingSessionId },
+            });
+            if (profileComplete(now)) break;
+          }
         } catch (err) {
           logger.warn({ err, onboardingSessionId, pg }, 'capture page failed');
         }
@@ -639,41 +689,187 @@ export class DeepScrapeProcessor {
           await page.waitForSelector('table', { timeout: 5_000 }).catch(() => undefined);
           const text = ((await page.locator('body').innerText().catch(() => '')) || '').trim();
           if (!/academic session|cgpa|\bgpa\b|transcript|grade/i.test(text)) continue;
-          // Parse table in-place (same logic as scrapeAcademicResults) without re-navigation.
-          const rows: Array<Record<string, string>> = [];
-          const tableText = await page.locator('table').first().innerText().catch(() => '');
-          for (const line of tableText.split('\n')) {
-            const parts = line.split('\t').map((p) => p.trim()).filter(Boolean);
-            const sessionIdx = parts.findIndex((p) => /\d{4}\/\d{4}/.test(p));
-            if (sessionIdx >= 0 && parts.length - sessionIdx >= 5) {
-              const slice = parts.slice(sessionIdx);
-              rows.push({
-                session: slice[0],
-                semester: slice[1],
-                level: slice[2],
-                cgpa: slice[3],
-                gpa: slice[4],
-              });
-            }
-          }
+          const rows = await this.parseResultSummary(page);
           if (rows.length === 0) continue;
+          const statements = await this.readResultStatements(page, rows, onboardingSessionId);
           const latestCgpa = Number(rows[rows.length - 1]?.cgpa);
           await prisma.discoveredAcademicRecord.create({
             data: {
               onboardingSessionId,
               userId,
               cumulativeGpa: Number.isFinite(latestCgpa) ? latestCgpa : undefined,
-              courseGrades: rows,
-              gradingScale: { source: 'portal-result-table', page: pg },
+              courseGrades: rows as unknown as object,
+              gradingScale: { source: 'portal-result-table', page: pg, statements },
             },
           });
-          logger.info({ onboardingSessionId, rows: rows.length, pg }, 'Scraped academic results');
+          logger.info(
+            {
+              onboardingSessionId,
+              rows: rows.length,
+              pg,
+              statements,
+              courses: rows.reduce((n, r) => n + (r.courses?.length ?? 0), 0),
+            },
+            'Scraped academic results',
+          );
           break;
         } catch {
           continue;
         }
       }
     }
+  }
+
+  /**
+   * Courses from stored result statements. Each code appears once, from the
+   * latest semester it was taken in; only the most recent semester is offered.
+   */
+  private async coursesFromResults(onboardingSessionId: string): Promise<ScrapedCourse[]> {
+    const records = await prisma.discoveredAcademicRecord.findMany({
+      where: { onboardingSessionId },
+      orderBy: { createdAt: 'desc' },
+      take: 1,
+    });
+    const rows = Array.isArray(records[0]?.courseGrades)
+      ? (records[0].courseGrades as unknown as ResultRow[])
+      : [];
+    const withCourses = rows.filter((r) => Array.isArray(r?.courses) && r.courses.length > 0);
+    if (withCourses.length === 0) return [];
+    const latest = withCourses[withCourses.length - 1];
+
+    const byCode = new Map<string, ScrapedCourse>();
+    for (const row of withCourses) {
+      const label = [row.level, row.semester, row.session].filter(Boolean).join(' ');
+      for (const c of row.courses ?? []) {
+        const key = c.code.replace(/[\s-]+/g, '').toUpperCase();
+        byCode.set(key, {
+          externalId: `result-${key}`,
+          code: c.code,
+          title: c.title || c.code,
+          units: c.units,
+          semester: label || undefined,
+          selected: row === latest,
+        });
+      }
+    }
+    return [...byCode.values()];
+  }
+
+  /**
+   * Semester summary rows (session, semester, level, CGPA, GPA) from the
+   * results table on the current page, deduped and sorted oldest first.
+   * Each row may carry a link to that semester's statement of result.
+   */
+  private async parseResultSummary(
+    page: Page,
+  ): Promise<Array<ResultRow & { statementUrl?: string }>> {
+    const tables = await page
+      .evaluate<Array<Array<{ cells: string[]; href: string }>>>(`(() =>
+        Array.from(document.querySelectorAll('table')).map((table) =>
+          Array.from(table.querySelectorAll('tr')).map((tr) => ({
+            cells: Array.from(tr.querySelectorAll('th,td')).map((td) =>
+              (td.innerText || '').replace(/\\s+/g, ' ').trim()),
+            href: (tr.querySelector('a[href]') || {}).href || '',
+          }))))()`)
+      .catch(() => [] as Array<Array<{ cells: string[]; href: string }>>);
+
+    for (const table of tables) {
+      const out = new Map<string, ResultRow & { statementUrl?: string }>();
+      for (const tr of table) {
+        const parts = tr.cells.filter(Boolean);
+        const sessionIdx = parts.findIndex((p) => /^\d{4}\s*\/\s*\d{4}$/.test(p));
+        if (sessionIdx < 0 || parts.length - sessionIdx < 5) continue;
+        const slice = parts.slice(sessionIdx);
+        const row: ResultRow & { statementUrl?: string } = {
+          session: slice[0],
+          semester: slice[1],
+          level: slice[2],
+          cgpa: slice[3],
+          gpa: slice[4],
+        };
+        if (/^https?:/i.test(tr.href)) row.statementUrl = tr.href;
+        const key = `${row.session}|${row.semester}|${row.level}`.toLowerCase();
+        if (!out.has(key) || (!out.get(key)!.statementUrl && row.statementUrl)) out.set(key, row);
+      }
+      if (out.size > 0) return [...out.values()].sort(compareResultRows);
+    }
+    return [];
+  }
+
+  /**
+   * Opens each semester's statement of result (same browser session) and
+   * reads its course table. Fills `rows[i].courses` and strips the URLs so
+   * nothing identifying is stored. Returns how many statements were read.
+   */
+  private async readResultStatements(
+    page: Page,
+    rows: Array<ResultRow & { statementUrl?: string }>,
+    onboardingSessionId: string,
+  ): Promise<number> {
+    let read = 0;
+    const targets = rows.filter((r) => r.statementUrl).slice(-MAX_RESULT_STATEMENTS);
+    if (targets.length > 0) {
+      const tab = await page.context().newPage();
+      try {
+        for (const row of targets) {
+          try {
+            await tab.goto(row.statementUrl!, { waitUntil: 'domcontentloaded', timeout: 25_000 });
+            await tab.waitForSelector('table', { timeout: 6_000 }).catch(() => undefined);
+            const tables = await tab
+              .evaluate<string[][][]>(`(() =>
+                Array.from(document.querySelectorAll('table')).map((table) =>
+                  Array.from(table.querySelectorAll('tr')).map((tr) =>
+                    Array.from(tr.querySelectorAll('th,td')).map((td) =>
+                      (td.innerText || '').replace(/\\s+/g, ' ').trim()))))()`)
+              .catch(() => [] as string[][][]);
+            let courses = parseStatementCourses(tables);
+            if (courses.length === 0) {
+              const text = ((await tab.locator('body').innerText().catch(() => '')) || '').trim();
+              courses = await this.extractStatementCourses(text);
+            }
+            if (courses.length > 0) {
+              row.courses = courses;
+              read += 1;
+            }
+          } catch (err) {
+            logger.warn(
+              { onboardingSessionId, err: err instanceof Error ? err.message : String(err) },
+              'Result statement read failed',
+            );
+          }
+        }
+      } finally {
+        await tab.close().catch(() => undefined);
+      }
+    }
+    for (const row of rows) delete row.statementUrl;
+    return read;
+  }
+
+  /** LLM fallback when a statement's course table has no recognisable header. */
+  private async extractStatementCourses(text: string): Promise<ResultCourseRow[]> {
+    if (text.length < 60) return [];
+    const extracted = await this.extractJson(
+      "You read one semester's statement of result from a student's school portal. List the course " +
+        "units on it. Return STRICT JSON: {\"courses\": [{\"code\": string, \"title\": string, " +
+        '"units": number|null, "grade": string|null}]}. Return {"courses": []} if there are none.',
+      text.slice(0, 8_000),
+    );
+    const list = Array.isArray(extracted.courses) ? extracted.courses : [];
+    const out: ResultCourseRow[] = [];
+    for (const item of list) {
+      if (!item || typeof item !== 'object') continue;
+      const r = item as Record<string, unknown>;
+      const code = typeof r.code === 'string' ? r.code.trim() : '';
+      if (!COURSE_CODE.test(code)) continue;
+      out.push({
+        code,
+        title: typeof r.title === 'string' && r.title.trim() ? r.title.trim() : code,
+        units: parseUnits(r.units),
+        grade: typeof r.grade === 'string' && r.grade.trim() ? r.grade.trim().slice(0, 8) : undefined,
+      });
+    }
+    return out;
   }
 
   private async scrapeAssignments(
@@ -1062,4 +1258,70 @@ function portalHost(url: string): string {
   } catch {
     return url;
   }
+}
+
+function profileComplete(
+  profile: { departmentName?: string | null; academicLevelName?: string | null } | null,
+): boolean {
+  return !!profile?.departmentName?.trim() && !!profile?.academicLevelName?.trim();
+}
+
+const SEMESTER_ORDER: Array<[RegExp, number]> = [
+  [/\b(first|1st|harmattan)\b/i, 1],
+  [/\b(second|2nd|rain)\b/i, 2],
+  [/\b(third|3rd|summer)\b/i, 3],
+];
+
+function semesterRank(semester: string): number {
+  for (const [re, rank] of SEMESTER_ORDER) if (re.test(semester)) return rank;
+  return 0;
+}
+
+/** Oldest first: by session start year, then semester. */
+function compareResultRows(a: ResultRow, b: ResultRow): number {
+  const ya = Number(/(\d{4})/.exec(a.session)?.[1] ?? 0);
+  const yb = Number(/(\d{4})/.exec(b.session)?.[1] ?? 0);
+  if (ya !== yb) return ya - yb;
+  return semesterRank(a.semester) - semesterRank(b.semester);
+}
+
+/**
+ * Course rows from statement-of-result tables: finds a header row with a
+ * course-code column plus a title, unit or grade column, then reads the rows
+ * below it whose code looks like a course unit.
+ */
+export function parseStatementCourses(tables: string[][][]): ResultCourseRow[] {
+  const out: ResultCourseRow[] = [];
+  const seen = new Set<string>();
+  for (const rows of tables) {
+    let cols: { code: number; title: number; units: number; grade: number } | null = null;
+    for (const cells of rows) {
+      const lower = cells.map((c) => c.toLowerCase());
+      const codeIdx = lower.findIndex((c) => /\b(course\s*)?code\b/.test(c));
+      if (codeIdx >= 0) {
+        const titleIdx = lower.findIndex((c, i) => i !== codeIdx && /title|name|description/.test(c));
+        const unitsIdx = lower.findIndex((c) => /\bunit|credit|\bcu\b|\bcr\b/.test(c));
+        const gradeIdx = lower.findIndex((c) => /grade|remark/.test(c) && !/point/.test(c));
+        if (titleIdx >= 0 || gradeIdx >= 0 || unitsIdx >= 0) {
+          cols = { code: codeIdx, title: titleIdx, units: unitsIdx, grade: gradeIdx };
+          continue;
+        }
+      }
+      if (!cols) continue;
+      const code = (cells[cols.code] ?? '').trim();
+      if (!COURSE_CODE.test(code) || code.length > 16) continue;
+      const key = code.replace(/[\s-]+/g, '').toUpperCase();
+      if (seen.has(key)) continue;
+      seen.add(key);
+      const title = cols.title >= 0 ? (cells[cols.title] ?? '').trim() : '';
+      const grade = cols.grade >= 0 ? (cells[cols.grade] ?? '').trim() : '';
+      out.push({
+        code,
+        title: title || code,
+        units: cols.units >= 0 ? parseUnits(cells[cols.units]) : undefined,
+        grade: grade && grade.length <= 8 ? grade : undefined,
+      });
+    }
+  }
+  return out;
 }

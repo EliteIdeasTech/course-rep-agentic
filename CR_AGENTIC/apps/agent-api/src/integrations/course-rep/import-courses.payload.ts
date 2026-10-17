@@ -16,11 +16,15 @@ export interface AgentImportCourse {
   instructor?: string;
   /** True when the student chose to offer this course; false leaves it unoffered. */
   offered: boolean;
+  /** Letter grade from the portal's result statements, when known. */
+  grade?: string;
 }
 
 export interface ImportCoursesFromAgentRequest {
   userId: string;
   courses: AgentImportCourse[];
+  /** Latest cumulative GPA from the portal's results page. */
+  cumulativeGpa?: number;
 }
 
 export interface ImportCoursesFromAgentResponse {
@@ -51,6 +55,7 @@ function courseCode(course: DiscoveredCourseForImport): string {
 
 export function toAgentImportCourses(
   courses: DiscoveredCourseForImport[],
+  gradesByCode: Map<string, string> = new Map(),
 ): AgentImportCourse[] {
   return courses.map((course) => {
     const payload: AgentImportCourse = {
@@ -61,8 +66,55 @@ export function toAgentImportCourses(
     if (course.units != null) payload.units = course.units;
     const instructor = course.instructor?.trim();
     if (instructor) payload.instructor = instructor;
+    const grade = gradesByCode.get(normalizeCourseCode(payload.code));
+    if (grade) payload.grade = grade.slice(0, 8);
     return payload;
   });
+}
+
+export function normalizeCourseCode(code: string): string {
+  return code.replace(/[\s-]+/g, '').toUpperCase();
+}
+
+type ResultCourse = { code?: unknown; grade?: unknown };
+type ResultSemester = { courses?: unknown };
+
+/**
+ * Letter grades by course code from stored result statements
+ * (`discovered_academic_records.courseGrades[].courses`). Semesters are stored
+ * oldest first, so a retaken course ends up with its latest grade.
+ */
+export function gradesFromAcademicRecords(
+  records: Array<{ courseGrades: unknown }>,
+): Map<string, string> {
+  const grades = new Map<string, string>();
+  for (const record of records) {
+    if (!Array.isArray(record.courseGrades)) continue;
+    for (const semester of record.courseGrades as ResultSemester[]) {
+      if (!semester || !Array.isArray(semester.courses)) continue;
+      for (const row of semester.courses as ResultCourse[]) {
+        if (typeof row?.code !== 'string' || typeof row?.grade !== 'string') continue;
+        const grade = row.grade.trim();
+        if (!grade) continue;
+        grades.set(normalizeCourseCode(row.code), grade);
+      }
+    }
+  }
+  return grades;
+}
+
+/** Latest cumulative GPA across stored records, if any is a sane number. */
+export function latestCumulativeGpa(
+  records: Array<{ cumulativeGpa: number | null; createdAt?: Date }>,
+): number | undefined {
+  const sorted = [...records].sort(
+    (a, b) => (b.createdAt?.getTime() ?? 0) - (a.createdAt?.getTime() ?? 0),
+  );
+  for (const record of sorted) {
+    const gpa = record.cumulativeGpa;
+    if (typeof gpa === 'number' && Number.isFinite(gpa) && gpa >= 0 && gpa <= 5) return gpa;
+  }
+  return undefined;
 }
 
 export function annotateOffered<T extends { selected: boolean }>(

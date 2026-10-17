@@ -70,7 +70,7 @@ export class CourseRepClient {
         return undefined as T;
       }
 
-      return (await res.json()) as T;
+      return unwrapEnvelope<T>(await res.json());
     } catch (error) {
       if (
         error &&
@@ -212,4 +212,23 @@ export class CourseRepClient {
       body: JSON.stringify(payload),
     });
   }
+}
+
+/**
+ * The main API wraps every response as `{ success, data, ... }` (global
+ * response interceptor). Callers expect the inner payload, e.g. `userId` from
+ * upsert-from-portal. Without this, claim-identity got `userId: undefined`.
+ * Plain (unwrapped) bodies pass through unchanged.
+ */
+export function unwrapEnvelope<T>(body: unknown): T {
+  if (
+    body &&
+    typeof body === 'object' &&
+    !Array.isArray(body) &&
+    'success' in body &&
+    'data' in body
+  ) {
+    return (body as { data: T }).data;
+  }
+  return body as T;
 }
