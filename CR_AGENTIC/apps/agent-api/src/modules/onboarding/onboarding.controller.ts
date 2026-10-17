@@ -14,6 +14,7 @@ import { PortalService } from './portal.service';
 import { LoginService } from './login.service';
 import { DeepDiscoveryService } from './deep-discovery.service';
 import { SyncService } from './sync.service';
+import { BackgroundImportService } from './background-import.service';
 import {
   ApplyResultsRequestDto,
   ConfirmPortalRequestDto,
@@ -34,6 +35,7 @@ export class OnboardingController {
     private readonly login: LoginService,
     private readonly deepDiscovery: DeepDiscoveryService,
     private readonly sync: SyncService,
+    private readonly backgroundImport: BackgroundImportService,
   ) {}
 
   @Post('start')
@@ -68,7 +70,23 @@ export class OnboardingController {
     @Headers('x-onboarding-guest-token') guestToken?: string,
   ) {
     const actor = await this.login.resolveActor(sessionId, userId, guestToken);
-    return this.onboarding.getStatus(actor, sessionId);
+    const status = await this.onboarding.getStatus(actor, sessionId);
+    const session = await this.onboarding.requireSession(actor, sessionId);
+    return { ...status, backgroundImport: await this.backgroundImport.describe(session) };
+  }
+
+  /**
+   * Student left the import screen ("Continue in background"). The scan keeps
+   * running; we push once when it is ready, needs them, or failed.
+   */
+  @Post(':sessionId/notify-on-finish')
+  async notifyOnFinish(
+    @CurrentUser('id') userId: string | undefined,
+    @Param('sessionId') sessionId: string,
+    @Headers('x-onboarding-guest-token') guestToken?: string,
+  ) {
+    const actor = await this.login.resolveActor(sessionId, userId, guestToken);
+    return this.backgroundImport.enable(actor, sessionId);
   }
 
   @Post(':sessionId/cancel')

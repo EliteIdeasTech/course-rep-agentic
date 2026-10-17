@@ -7,9 +7,11 @@ import { DeepDiscoveryService } from './deep-discovery.service';
 import { SyncService } from './sync.service';
 import { sessionStorageProvider } from './session-storage.provider';
 import { AuthModule } from '../auth/auth.module';
+import { NotificationsModule } from '../notifications/notifications.module';
+import { BackgroundImportService } from './background-import.service';
 
 @Module({
-  imports: [AuthModule],
+  imports: [AuthModule, NotificationsModule],
   controllers: [OnboardingController],
   providers: [
     OnboardingService,
@@ -17,6 +19,7 @@ import { AuthModule } from '../auth/auth.module';
     LoginService,
     DeepDiscoveryService,
     SyncService,
+    BackgroundImportService,
     sessionStorageProvider,
   ],
   exports: [OnboardingService],
