@@ -1,5 +1,8 @@
 import {
   IsArray,
+  IsInt,
+  Max,
+  Min,
   IsEnum,
   IsObject,
   IsOptional,
@@ -175,4 +178,46 @@ export class ApplyResultsRequestDto extends CourseImportSelectionDto {
   @IsArray()
   @IsUUID('all', { each: true })
   calendarEventIds?: string[];
+}
+
+/** Optional body for POST /onboarding/:id/cancel. No credential fields. */
+export class CancelOnboardingRequestDto {
+  @ApiPropertyOptional({ description: 'Funnel step / screen the student was on (e.g. credentials_submitted)' })
+  @IsOptional()
+  @IsString()
+  @MaxLength(40)
+  step?: string;
+
+  @ApiPropertyOptional({ description: 'Why: cancel_button | start_over | back_exit | app_closed' })
+  @IsOptional()
+  @IsString()
+  @MaxLength(40)
+  reason?: string;
+
+  @ApiPropertyOptional() @IsOptional() @IsString() @MaxLength(20) platform?: string;
+  @ApiPropertyOptional() @IsOptional() @IsString() @MaxLength(30) appVersion?: string;
+}
+
+/**
+ * POST /onboarding/:id/events. Client-reported funnel step or failure.
+ * Never send usernames, passwords, OTPs or tokens; the server also strips
+ * anything that looks like one.
+ */
+export class ClientFunnelEventDto {
+  @ApiProperty({ description: 'One of CLIENT_FUNNEL_EVENTS (e.g. start_failed, credentials_submitted)' })
+  @IsString()
+  @MaxLength(40)
+  event!: string;
+
+  @ApiPropertyOptional() @IsOptional() @IsString() @MaxLength(40) step?: string;
+  @ApiPropertyOptional({ description: 'FUNNEL_FAILURE_REASONS value, if the client knows it' })
+  @IsOptional() @IsString() @MaxLength(40) reason?: string;
+  @ApiPropertyOptional({ description: 'Exception class, e.g. AgentApiException, TimeoutException' })
+  @IsOptional() @IsString() @MaxLength(80) errorClass?: string;
+  @ApiPropertyOptional() @IsOptional() @IsInt() @Min(0) @Max(999) httpStatus?: number;
+  @ApiPropertyOptional({ description: 'Error message (sanitised server-side, max 300)' })
+  @IsOptional() @IsString() @MaxLength(500) message?: string;
+  @ApiPropertyOptional() @IsOptional() @IsString() @MaxLength(20) platform?: string;
+  @ApiPropertyOptional() @IsOptional() @IsString() @MaxLength(30) appVersion?: string;
+  @ApiPropertyOptional() @IsOptional() @IsObject() metadata?: Record<string, unknown>;
 }

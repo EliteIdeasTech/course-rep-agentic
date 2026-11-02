@@ -23,3 +23,4 @@ export async function disconnectPrisma(): Promise<void> {
 
 export * from './onboarding-transition';
 export * from './university-portal-memory';
+export * from './portal-funnel-events';

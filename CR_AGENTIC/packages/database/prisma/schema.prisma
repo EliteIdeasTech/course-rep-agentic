@@ -448,6 +448,7 @@ model OnboardingSession {
   academicRecords    DiscoveredAcademicRecord[]
   calendarEvents     DiscoveredCalendarEvent[]
   auditEvents        OnboardingAuditEvent[]
+  funnelEvents       OnboardingFunnelEvent[]
   connectedAccounts  ConnectedAccount[]
 
   @@index([userId, stage])
@@ -647,4 +648,38 @@ model OnboardingAuditEvent {
 
   @@index([onboardingSessionId, createdAt])
   @@map("onboarding_audit_events")
+}
+
+/// Portal-connect funnel: one row per step transition, failure, cancel or
+/// client-reported step. Never stores portal usernames, passwords or OTPs;
+/// message/metadata are sanitised by @cr-agentic/shared portal-funnel helpers.
+model OnboardingFunnelEvent {
+  id                  String   @id @default(uuid()) @db.Uuid
+  onboardingSessionId String   @db.Uuid
+  /// step | failed | cancelled | client
+  event               String
+  /// FUNNEL_STEPS value the student was on / reached
+  step                String?
+  fromStep            String?
+  /// FUNNEL_FAILURE_REASONS value (failed/cancelled) or client event name
+  reason              String?
+  /// Raw reason from the writer (e.g. browser-worker LoginFailureReason)
+  rawReason           String?
+  errorClass          String?
+  httpStatus          Int?
+  /// Sanitised, max 300 chars
+  message             String?
+  /// server | browser_worker | discovery_worker | mobile | web
+  source              String
+  platform            String?
+  appVersion          String?
+  metadata            Json?
+  createdAt           DateTime @default(now())
+
+  onboardingSession OnboardingSession @relation(fields: [onboardingSessionId], references: [id], onDelete: Cascade)
+
+  @@index([onboardingSessionId, createdAt])
+  @@index([createdAt])
+  @@index([event, reason])
+  @@map("onboarding_funnel_events")
 }
