@@ -1,6 +1,7 @@
 import { canTransitionStage } from '@cr-agentic/shared';
 import { OnboardingStage, Prisma } from '@prisma/client';
 import { prisma } from './index';
+import { funnelEventForTransition, recordFunnelEvent } from './portal-funnel-events';
 
 /**
  * Applies an onboarding stage transition from a worker context (no Nest deps),
@@ -38,4 +39,12 @@ export async function recordOnboardingTransition(
       },
     }),
   ]);
+  await recordFunnelEvent(funnelEventForTransition(sessionId, from, to, detail, workerSource()));
+}
+
+function workerSource(): 'browser_worker' | 'discovery_worker' | 'server' {
+  const svc = `${process.env.SERVICE_NAME ?? ''} ${process.env.npm_package_name ?? ''} ${process.argv[1] ?? ''}`;
+  if (/browser/.test(svc)) return 'browser_worker';
+  if (/discovery/.test(svc)) return 'discovery_worker';
+  return 'server';
 }

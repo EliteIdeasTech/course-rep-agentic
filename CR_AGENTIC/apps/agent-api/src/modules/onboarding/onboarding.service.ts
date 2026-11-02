@@ -1,6 +1,19 @@
 import { BadRequestException, Injectable, Logger, NotFoundException } from '@nestjs/common';
 import { randomUUID } from 'crypto';
-import { prisma, OnboardingStage, Prisma } from '@cr-agentic/database';
+import {
+  prisma,
+  OnboardingStage,
+  Prisma,
+  funnelEventForTransition,
+  recordFunnelEvent,
+} from '@cr-agentic/database';
+import {
+  classifyFunnelError,
+  funnelStepForStage,
+  isClientFunnelEvent,
+  isFunnelFailureReason,
+} from '@cr-agentic/shared';
+import { ClientFunnelEventDto, CancelOnboardingRequestDto } from './dto/onboarding.request.dto';
 import { writeAuditLog } from '@cr-agentic/observability';
 import { assertTransition, isTerminal } from './onboarding-state-machine';
 import { CourseRepClient } from '../../integrations/course-rep/course-rep.client';
@@ -236,12 +249,19 @@ export class OnboardingService {
     };
   }
 
-  async cancel(userId: string, sessionId: string) {
+  async cancel(userId: string, sessionId: string, dto: CancelOnboardingRequestDto = {}) {
     const session = await this.requireSession(userId, sessionId);
     if (isTerminal(session.stage)) {
       return { stage: session.stage };
     }
-    const updated = await this.transition(sessionId, session.stage, 'CANCELLED');
+    const updated = await this.transition(sessionId, session.stage, 'CANCELLED', {}, {
+      // Client step names the screen the student was on when they cancelled
+      // (falls back to the server stage). Never any credential material.
+      step: dto.step?.slice(0, 40) ?? funnelStepForStage(session.stage),
+      clientReason: dto.reason?.slice(0, 40),
+      platform: dto.platform?.slice(0, 20),
+      appVersion: dto.appVersion?.slice(0, 30),
+    });
 
     await writeAuditLog({
       actorId: userId,
@@ -300,5 +320,54 @@ export class OnboardingService {
         detail: detail as Prisma.InputJsonValue | undefined,
       },
     });
+    const funnel = funnelEventForTransition(sessionId, from, to, detail, 'server');
+    if (to === 'CANCELLED') {
+      funnel.platform = (detail?.platform as string | undefined) ?? null;
+      funnel.appVersion = (detail?.appVersion as string | undefined) ?? null;
+    }
+    await recordFunnelEvent(funnel);
+  }
+
+  /**
+   * Client-reported funnel step / failure (mobile, web). Session must belong
+   * to the caller. Event names are allow-listed; message + metadata sanitised.
+   */
+  async recordClientEvent(actor: string, sessionId: string, dto: ClientFunnelEventDto) {
+    const session = await this.requireSession(actor, sessionId);
+    if (!isClientFunnelEvent(dto.event)) {
+      throw new BadRequestException('Unknown funnel event');
+    }
+    const classified =
+      dto.errorClass || dto.message || dto.httpStatus
+        ? classifyFunnelError({ name: dto.errorClass, message: dto.message, status: dto.httpStatus })
+        : undefined;
+    const reason = isFunnelFailureReason(dto.reason)
+      ? dto.reason
+      : dto.event === 'start_failed' || dto.event === 'login_failed'
+        ? classified && classified.reason !== 'unknown'
+          ? classified.reason
+          : dto.event === 'start_failed'
+            ? 'start_failed'
+            : 'unknown'
+        : dto.event === 'login_poll_timeout'
+          ? 'timeout'
+          : dto.event === 'import_empty'
+            ? 'import_empty'
+            : null;
+    await recordFunnelEvent({
+      sessionId,
+      event: reason ? 'failed' : 'client',
+      step: dto.step ?? funnelStepForStage(session.stage),
+      reason: reason ?? dto.event,
+      rawReason: dto.event,
+      errorClass: dto.errorClass ?? null,
+      httpStatus: dto.httpStatus ?? null,
+      message: classified?.message ?? null,
+      source: dto.platform === 'web' ? 'web' : 'mobile',
+      platform: dto.platform ?? null,
+      appVersion: dto.appVersion ?? null,
+      metadata: dto.metadata ?? null,
+    });
+    return { ok: true };
   }
 }
