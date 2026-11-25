@@ -7,6 +7,7 @@ import {
   Post,
 } from '@nestjs/common';
 import { ApiBearerAuth, ApiHeader, ApiTags } from '@nestjs/swagger';
+import { TEST_ACCOUNT_HEADER } from '@cr-agentic/shared';
 import { CurrentUser } from '../auth/current-user.decorator';
 import { Public } from '../auth/public.decorator';
 import { OnboardingService } from './onboarding.service';
@@ -39,20 +40,33 @@ export class OnboardingController {
   ) {}
 
   @Post('start')
-  start(@CurrentUser('id') userId: string, @Body() dto: StartOnboardingRequestDto) {
-    return this.onboarding.start(userId, dto);
+  @ApiHeader({ name: TEST_ACCOUNT_HEADER, required: false, description: 'test_lab | reviewer | staff | example_domain' })
+  start(
+    @CurrentUser('id') userId: string,
+    @Body() dto: StartOnboardingRequestDto,
+    @Headers(TEST_ACCOUNT_HEADER) testAccountHint?: string,
+  ) {
+    return this.onboarding.start(userId, dto, { testAccountHint });
   }
 
   /** School-first: start without a Course Rep account. */
   @Public()
   @Post('start-guest')
-  async startGuest(@Body() dto: StartOnboardingRequestDto) {
+  @ApiHeader({ name: TEST_ACCOUNT_HEADER, required: false })
+  async startGuest(
+    @Body() dto: StartOnboardingRequestDto,
+    @Headers(TEST_ACCOUNT_HEADER) testAccountHint?: string,
+  ) {
     // Create session first with placeholder guest metadata, then bind token to session id.
-    const provisional = await this.onboarding.startGuest(dto, {
-      token: '',
-      tokenHash: 'pending',
-      expiresAt: new Date(Date.now() + 24 * 60 * 60 * 1000),
-    });
+    const provisional = await this.onboarding.startGuest(
+      dto,
+      {
+        token: '',
+        tokenHash: 'pending',
+        expiresAt: new Date(Date.now() + 24 * 60 * 60 * 1000),
+      },
+      { testAccountHint },
+    );
     const guest = this.login.issueGuestToken(provisional.onboardingSessionId);
     await this.onboarding.attachGuestToken(provisional.onboardingSessionId, guest);
     return {

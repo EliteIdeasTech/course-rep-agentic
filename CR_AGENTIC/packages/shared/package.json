@@ -5,7 +5,8 @@
   "main": "dist/index.js",
   "types": "dist/index.d.ts",
   "scripts": {
-    "build": "tsc -p tsconfig.json"
+    "build": "tsc -p tsconfig.json",
+    "test": "tsc --module commonjs --target ES2022 --moduleResolution node --esModuleInterop --types node --strict --skipLibCheck --rootDir src --outDir /tmp/shared-test src/onboarding/school-input.ts src/onboarding/test-account.ts src/onboarding/school-input.test.ts && node --test /tmp/shared-test/onboarding/*.test.js"
   },
   "devDependencies": {
     "typescript": "^5.7.2"

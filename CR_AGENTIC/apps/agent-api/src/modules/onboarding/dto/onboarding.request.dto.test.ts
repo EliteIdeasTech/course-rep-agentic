@@ -3,7 +3,7 @@ import assert from 'node:assert/strict';
 import { describe, it } from 'node:test';
 import { plainToInstance } from 'class-transformer';
 import { validate } from 'class-validator';
-import { StartOnboardingRequestDto } from './onboarding.request.dto';
+import { StartOnboardingRequestDto, UNIVERSITY_NAME_EMAIL_MESSAGE } from './onboarding.request.dto';
 
 const demoId = '52dda19f-870e-4ef5-9e92-4cb0d12643da';
 
@@ -35,5 +35,25 @@ describe('StartOnboardingRequestDto universityName', () => {
   it('rejects a non-string universityName even when universityId is set', async () => {
     const found = await messages({ universityId: demoId, universityName: 1 });
     assert.ok(found.some((message) => message.includes('universityName')));
+  });
+});
+
+describe('StartOnboardingRequestDto email-like universityName', () => {
+  it('rejects an email typed as the school name (pre-launch robots)', async () => {
+    for (const universityName of ['reviewerapp001@gmail.com', 'buchi@courserep.ng', ' ada@unilag ']) {
+      const found = await messages({ universityName });
+      assert.ok(found.includes(UNIVERSITY_NAME_EMAIL_MESSAGE), universityName);
+    }
+  });
+
+  it('rejects an email name even when universityId is set', async () => {
+    const found = await messages({ universityId: demoId, universityName: 'ap@courserep.org' });
+    assert.ok(found.includes(UNIVERSITY_NAME_EMAIL_MESSAGE));
+  });
+
+  it('still accepts real names and acronyms', async () => {
+    for (const universityName of ['University of Lagos', 'UNILAG', 'Ho Technical University']) {
+      assert.deepEqual(await messages({ universityName }), [], universityName);
+    }
   });
 });
