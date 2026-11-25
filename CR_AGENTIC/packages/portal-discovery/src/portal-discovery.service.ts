@@ -1,13 +1,35 @@
 import { LmsType } from '@cr-agentic/shared';
 import type {
   DiscoverPortalInput,
+  HiddenCandidate,
   LlmCompletionClient,
   PageMetadata,
   PortalCandidateResult,
+  PortalDiscoveryResult,
   WebSearchClient,
 } from './types';
 import { fetchPageMetadata } from './tools/page-metadata';
 import { classifyLms } from './tools/classify-lms';
+import {
+  HIDDEN_REASON_MESSAGES,
+  hostOf,
+  portalLabel,
+  verifyCandidate,
+} from './verify';
+
+type SeedSource = 'known' | 'website_guess' | 'search' | 'llm';
+
+type Enriched = {
+  meta: PageMetadata;
+  lms: ReturnType<typeof classifyLms>;
+  heuristic: number;
+  source: SeedSource;
+};
+
+/** Max LLM-proposed URLs we will open to verify (they are never shown unverified). */
+const MAX_LLM_FETCHES = 5;
+/** LLM rank only nudges ordering between verified candidates. */
+const LLM_TIEBREAK_MAX = 0.05;
 
 const SYSTEM_PROMPT = `You are an assistant that identifies the official student login portal for a university.
 You are given web search results and fetched page metadata.
@@ -36,37 +58,124 @@ export class PortalDiscoveryService {
     private readonly maxPagesToFetch = 12,
   ) {}
 
+  /** Verified candidates only. Use {@link discoverDetailed} for hidden reasons. */
   async discover(input: DiscoverPortalInput): Promise<PortalCandidateResult[]> {
+    return (await this.discoverDetailed(input)).candidates;
+  }
+
+  /**
+   * Opens every URL before it can be suggested. Unverified URLs (dead DNS,
+   * errors, no sign-in page, another country's or school's domain) go to
+   * `hidden` with a student-facing reason. The LLM can propose URLs, but they
+   * are fetched and verified like any other and its ranking is a tie-breaker.
+   */
+  async discoverDetailed(input: DiscoverPortalInput): Promise<PortalDiscoveryResult> {
     const query = `${input.universityName} student portal login${input.country ? ' ' + input.country : ''}`;
-    const results = await this.search.search(query, 8);
+    const results = await this.search.search(query, 8).catch(() => []);
 
     // Priority seeds first so slice(0, maxPagesToFetch) keeps known + studentportal.* URLs.
-    const seeds = new Set<string>();
-    if (input.knownPortalUrl) seeds.add(input.knownPortalUrl);
-    for (const url of this.websiteSeedUrls(input.website)) seeds.add(url);
-    for (const r of results) seeds.add(r.url);
+    const seeds = new Map<string, SeedSource>();
+    if (input.knownPortalUrl) seeds.set(input.knownPortalUrl, 'known');
+    for (const url of this.websiteSeedUrls(input.website)) {
+      if (!seeds.has(url)) seeds.set(url, 'website_guess');
+    }
+    for (const r of results) if (!seeds.has(r.url)) seeds.set(r.url, 'search');
 
-    const metas = await Promise.all(
-      Array.from(seeds)
-        .slice(0, this.maxPagesToFetch)
-        .map((url) => fetchPageMetadata(url)),
-    );
+    const picked = Array.from(seeds.entries()).slice(0, this.maxPagesToFetch);
+    const metas = await Promise.all(picked.map(([url]) => fetchPageMetadata(url)));
+    const enriched: Enriched[] = metas.map((meta, i) => this.enrich(meta, picked[i][1]));
 
-    const enriched = metas.map((meta) => ({
-      meta,
-      lms: classifyLms(meta),
-      heuristic: this.heuristicScore(meta),
-    }));
-
+    // LLM proposals: fetch the ones we have not opened yet, then verify them too.
+    let llmRank = new Map<string, number>();
+    let portalNames = new Map<string, string>();
     try {
       const llmCandidates = await this.rankWithLlm(input, enriched);
-      const reranked = this.rerankCandidates(llmCandidates, enriched);
-      if (reranked.length > 0) return reranked;
+      const seen = new Set(enriched.flatMap((e) => [e.meta.url, e.meta.finalUrl]));
+      const toFetch = llmCandidates
+        .map((c) => c.loginUrl)
+        .filter((u) => !seen.has(u))
+        .slice(0, MAX_LLM_FETCHES);
+      const extra = await Promise.all(toFetch.map((u) => fetchPageMetadata(u)));
+      for (const meta of extra) enriched.push(this.enrich(meta, 'llm'));
+      llmRank = new Map(llmCandidates.map((c, i) => [c.loginUrl, i] as const));
+      portalNames = new Map(
+        llmCandidates.filter((c) => c.portalName).map((c) => [c.loginUrl, c.portalName!] as const),
+      );
     } catch {
-      // Fall through to heuristic ranking if the LLM call/parse fails.
+      // LLM is optional: verification + heuristics decide on their own.
     }
 
-    return this.heuristicRanking(enriched);
+    const school = {
+      universityName: input.universityName,
+      country: input.country,
+      website: input.website,
+      knownPortalUrl: input.knownPortalUrl,
+    };
+
+    const verified: PortalCandidateResult[] = [];
+    const hidden: HiddenCandidate[] = [];
+    const seenKeys = new Set<string>();
+
+    for (const e of enriched) {
+      const key = e.meta.finalUrl.replace(/\/+$/, '').toLowerCase();
+      if (seenKeys.has(key)) continue;
+      seenKeys.add(key);
+
+      const check = verifyCandidate(e.meta, e.lms.lmsType, school);
+      if (!check.verified) {
+        if (this.worthReportingHidden(e)) {
+          const reason = check.hiddenReason ?? 'no_login_signal';
+          hidden.push({
+            url: e.meta.url,
+            host: hostOf(e.meta.finalUrl) || hostOf(e.meta.url),
+            reason,
+            message: HIDDEN_REASON_MESSAGES[reason],
+          });
+        }
+        continue;
+      }
+
+      const rank = llmRank.get(e.meta.url) ?? llmRank.get(e.meta.finalUrl);
+      const tiebreak = rank === undefined ? 0 : Math.max(0, LLM_TIEBREAK_MAX - rank * 0.01);
+      const base = Math.max(e.heuristic, 0.2);
+      const confidence = Math.min(1, Number((base + tiebreak).toFixed(2)));
+      verified.push({
+        loginUrl: e.meta.finalUrl,
+        portalName: portalNames.get(e.meta.url) ?? portalNames.get(e.meta.finalUrl) ?? e.meta.title,
+        label: portalLabel(e.meta.finalUrl, e.lms.lmsType, e.meta.title),
+        lmsType: e.lms.lmsType,
+        confidence,
+        evidence: [...check.evidence, ...this.buildEvidence(e.meta, e.lms)].filter(
+          (v, i, all) => all.indexOf(v) === i,
+        ),
+      });
+    }
+
+    verified.sort((a, b) => b.confidence - a.confidence);
+    return {
+      candidates: verified.slice(0, 5),
+      hidden: this.dedupeHidden(hidden).slice(0, 5),
+    };
+  }
+
+  private enrich(meta: PageMetadata, source: SeedSource): Enriched {
+    return { meta, lms: classifyLms(meta), heuristic: this.heuristicScore(meta), source };
+  }
+
+  /**
+   * Website guesses (portal.<domain>, /portal/login, …) fail often by design;
+   * only report links a student or the AI would actually have seen.
+   */
+  private worthReportingHidden(e: Enriched): boolean {
+    if (e.source === 'known' || e.source === 'llm') return true;
+    if (e.source === 'website_guess') return false;
+    return this.scoreUrlOnly(e.meta.url) >= 0.2 || /portal|login|student|lms|moodle|sis/i.test(e.meta.url);
+  }
+
+  private dedupeHidden(hidden: HiddenCandidate[]): HiddenCandidate[] {
+    const byHost = new Map<string, HiddenCandidate>();
+    for (const h of hidden) if (!byHost.has(h.host)) byHost.set(h.host, h);
+    return Array.from(byHost.values());
   }
 
   /**
@@ -169,54 +278,6 @@ export class PortalDiscoveryService {
     }
 
     return Math.max(0, Math.min(1, score));
-  }
-
-  private heuristicRanking(
-    enriched: Array<{
-      meta: PageMetadata;
-      lms: ReturnType<typeof classifyLms>;
-      heuristic: number;
-    }>,
-  ): PortalCandidateResult[] {
-    return enriched
-      .filter((e) => e.heuristic >= 0.2 && !CMS_AUTH_RE.test(e.meta.finalUrl))
-      .sort((a, b) => b.heuristic - a.heuristic)
-      .slice(0, 5)
-      .map((e) => ({
-        loginUrl: e.meta.finalUrl,
-        portalName: e.meta.title,
-        lmsType: e.lms.lmsType,
-        confidence: Number(e.heuristic.toFixed(2)),
-        evidence: this.buildEvidence(e.meta, e.lms),
-      }));
-  }
-
-  /** Blend LLM order with heuristics so CMS auth never stays on top. */
-  private rerankCandidates(
-    llmCandidates: PortalCandidateResult[],
-    enriched: Array<{ meta: PageMetadata; heuristic: number }>,
-  ): PortalCandidateResult[] {
-    const heuristicByUrl = new Map(
-      enriched.map((e) => [e.meta.finalUrl, e.heuristic] as const),
-    );
-
-    return llmCandidates
-      .map((c, index) => {
-        const heuristic = heuristicByUrl.get(c.loginUrl) ?? this.scoreUrlOnly(c.loginUrl);
-        const llmBoost = Math.max(0, 0.2 - index * 0.03);
-        let confidence = Math.max(c.confidence * 0.5 + heuristic * 0.5 + llmBoost, heuristic);
-        if (CMS_AUTH_RE.test(c.loginUrl)) confidence = Math.min(confidence, 0.05);
-        return {
-          ...c,
-          confidence: Math.max(0, Math.min(1, Number(confidence.toFixed(2)))),
-          evidence: CMS_AUTH_RE.test(c.loginUrl)
-            ? [...c.evidence, 'demoted cms auth']
-            : c.evidence,
-        };
-      })
-      .filter((c) => c.confidence >= 0.2 && !CMS_AUTH_RE.test(c.loginUrl))
-      .sort((a, b) => b.confidence - a.confidence)
-      .slice(0, 5);
   }
 
   private scoreUrlOnly(url: string): number {

@@ -9,13 +9,17 @@ import {
 } from '@cr-agentic/database';
 import {
   classifyFunnelError,
+  classifyTestAccount,
   funnelStepForStage,
   isClientFunnelEvent,
   isFunnelFailureReason,
+  TestAccountTag,
+  universityNameLooksLikeEmail,
 } from '@cr-agentic/shared';
 import { ClientFunnelEventDto, CancelOnboardingRequestDto } from './dto/onboarding.request.dto';
 import { writeAuditLog } from '@cr-agentic/observability';
 import { assertTransition, isTerminal } from './onboarding-state-machine';
+import { hiddenPortalsFrom } from './portal-views';
 import { CourseRepClient } from '../../integrations/course-rep/course-rep.client';
 import { StartOnboardingRequestDto } from './dto/onboarding.request.dto';
 import {
@@ -27,20 +31,42 @@ import {
 
 const ONBOARDING_TTL_MS = 24 * 60 * 60 * 1000;
 
+/** Extra staff/test emails (comma separated) excluded from onboarding metrics. */
+function extraTestEmails(): string[] {
+  return (process.env.ONBOARDING_TEST_ACCOUNT_EMAILS ?? '')
+    .split(',')
+    .map((e) => e.trim())
+    .filter(Boolean);
+}
+
+/** Client context the controller passes through (headers only, never the body). */
+export interface StartClientContext {
+  testAccountHint?: string;
+}
+
 @Injectable()
 export class OnboardingService {
   private readonly logger = new Logger(OnboardingService.name);
 
   constructor(private readonly courseRep: CourseRepClient) {}
 
-  async start(userId: string, dto: StartOnboardingRequestDto) {
-    await this.courseRep.getUser(userId);
+  async start(
+    userId: string,
+    dto: StartOnboardingRequestDto,
+    client: StartClientContext = {},
+  ) {
+    const user = await this.courseRep.getUser(userId);
 
     const loaded = await this.lookupUniversity(dto.universityId);
     const resolved = this.withUniversityName(dto, loaded);
     if (universityRecordIsDemo(loaded)) {
       return this.startReviewerDemo(userId, resolved);
     }
+    const testAccount = classifyTestAccount({
+      clientHint: client.testAccountHint,
+      email: (user as { email?: string } | null | undefined)?.email,
+      extraEmails: extraTestEmails(),
+    });
 
     const session = await prisma.onboardingSession.create({
       data: {
@@ -53,11 +79,13 @@ export class OnboardingService {
         academicLevelName: resolved.academicLevelName,
         stage: 'UNIVERSITY_SELECTED',
         expiresAt: new Date(Date.now() + ONBOARDING_TTL_MS),
+        ...(testAccount ? { metadata: testAccountMetadata(testAccount) } : {}),
       },
     });
 
     await this.recordAudit(session.id, null, 'UNIVERSITY_SELECTED', {
       universityName: resolved.universityName,
+      ...(testAccount ? { testAccount: testAccount.reason } : {}),
     });
 
     await writeAuditLog({
@@ -149,6 +177,11 @@ export class OnboardingService {
         'universityName is required when the university record cannot be loaded',
       );
     }
+    // Defence in depth: the DTO already rejects this, but a name filled from
+    // elsewhere must never start portal discovery for an email address.
+    if (universityNameLooksLikeEmail(universityName)) {
+      throw new BadRequestException('universityName must be a school name, not an email address');
+    }
     return { ...dto, universityName };
   }
 
@@ -159,11 +192,13 @@ export class OnboardingService {
   async startGuest(
     dto: StartOnboardingRequestDto,
     guest: { token: string; tokenHash: string; expiresAt: Date },
+    client: StartClientContext = {},
   ) {
     const provisionalUserId = randomUUID();
     const needsName = !dto.universityName?.trim();
     const loaded = needsName ? await this.lookupUniversity(dto.universityId) : undefined;
     const resolved = this.withUniversityName(dto, loaded);
+    const testAccount = classifyTestAccount({ clientHint: client.testAccountHint });
 
     const session = await prisma.onboardingSession.create({
       data: {
@@ -180,6 +215,7 @@ export class OnboardingService {
           isGuest: true,
           guestTokenHash: guest.tokenHash,
           guestTokenExpiresAt: guest.expiresAt.toISOString(),
+          ...(testAccount ? testAccountMetadata(testAccount) : {}),
         },
       },
     });
@@ -190,6 +226,7 @@ export class OnboardingService {
     await this.recordAudit(session.id, null, 'UNIVERSITY_SELECTED', {
       universityName: resolved.universityName,
       guest: true,
+      ...(testAccount ? { testAccount: testAccount.reason } : {}),
     });
 
     await writeAuditLog({
@@ -246,6 +283,7 @@ export class OnboardingService {
       completedAt: session.completedAt,
       isTerminal: isTerminal(session.stage),
       demo: sessionIsDemo(session.metadata),
+      hiddenPortals: hiddenPortalsFrom(session.metadata),
     };
   }
 
@@ -370,4 +408,9 @@ export class OnboardingService {
     });
     return { ok: true };
   }
+}
+
+/** Shape stored on onboarding_sessions.metadata for metrics exclusion. */
+export function testAccountMetadata(tag: TestAccountTag): Prisma.InputJsonObject {
+  return { testAccount: { isTest: true, reason: tag.reason } };
 }

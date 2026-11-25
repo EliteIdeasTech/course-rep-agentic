@@ -22,6 +22,7 @@ import {
   ManualPortalRequestDto,
 } from './dto/onboarding.request.dto';
 import { sessionIsDemo } from './reviewer-demo';
+import { candidateView } from './portal-views';
 
 const REACH_TIMEOUT_MS = 6_000;
 
@@ -88,15 +89,7 @@ export class PortalService {
       orderBy: { confidence: 'desc' },
     });
 
-    return candidates.map((c) => ({
-      id: c.id,
-      loginUrl: c.loginUrl,
-      lmsType: c.lmsType as PortalCandidateView['lmsType'],
-      portalName: c.portalName ?? undefined,
-      confidence: c.confidence,
-      evidence: c.evidence,
-      source: c.source as PortalCandidateView['source'],
-    }));
+    return candidates.map((c) => candidateView(c));
   }
 
   async confirm(userId: string, sessionId: string, dto: ConfirmPortalRequestDto) {

@@ -5,7 +5,8 @@
   "main": "dist/index.js",
   "types": "dist/index.d.ts",
   "scripts": {
-    "build": "tsc -p tsconfig.json"
+    "build": "tsc -p tsconfig.json",
+    "test": "tsc --module commonjs --target ES2022 --moduleResolution node --esModuleInterop --types node --strict --skipLibCheck --rootDir src --outDir /tmp/portal-discovery-test src/verify.test.ts && NODE_PATH=./node_modules:../../node_modules node --test /tmp/portal-discovery-test/*.test.js"
   },
   "dependencies": {
     "@cr-agentic/shared": "0.1.0",

@@ -9,13 +9,35 @@ import {
   IsString,
   IsUUID,
   MaxLength,
+  registerDecorator,
   ValidateIf,
+  ValidationOptions,
   ValidateNested,
 } from 'class-validator';
 import { Type } from 'class-transformer';
 import { ApiProperty, ApiPropertyOptional } from '@nestjs/swagger';
-import { LmsType } from '@cr-agentic/shared';
+import { LmsType, universityNameLooksLikeEmail } from '@cr-agentic/shared';
 import { universityNameMustBeValidated } from '../../../integrations/course-rep/university-record';
+
+export const UNIVERSITY_NAME_EMAIL_MESSAGE =
+  'universityName must be a school name, not an email address';
+
+/** Rejects "ada@gmail.com" typed into the school field (pre-launch robots, confused students). */
+export function IsNotEmailLike(options?: ValidationOptions) {
+  return (object: object, propertyName: string) => {
+    registerDecorator({
+      name: 'isNotEmailLike',
+      target: object.constructor,
+      propertyName,
+      options: { message: UNIVERSITY_NAME_EMAIL_MESSAGE, ...options },
+      validator: {
+        validate(value: unknown) {
+          return typeof value !== 'string' || !universityNameLooksLikeEmail(value);
+        },
+      },
+    });
+  };
+}
 
 export class StartOnboardingRequestDto {
   @ApiPropertyOptional({ description: 'University id from the main Course Rep app' })
@@ -29,6 +51,7 @@ export class StartOnboardingRequestDto {
   })
   @ValidateIf((dto: StartOnboardingRequestDto) => universityNameMustBeValidated(dto))
   @IsString()
+  @IsNotEmailLike()
   universityName?: string;
 
   @ApiPropertyOptional()

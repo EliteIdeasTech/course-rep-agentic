@@ -1,4 +1,4 @@
-import type { PageMetadata } from '../types';
+import type { PageFetchError, PageMetadata } from '../types';
 
 const TITLE_RE = /<title[^>]*>([^<]*)<\/title>/i;
 const LOGIN_FORM_RE = /<form[^>]*>[\s\S]*?(type=["']?password|name=["']?(password|passwd|pwd))/i;
@@ -26,10 +26,33 @@ export async function fetchPageMetadata(
       title: TITLE_RE.exec(html)?.[1]?.trim(),
       hasLoginForm: LOGIN_FORM_RE.test(html),
       htmlSample: html.slice(0, 20_000),
+      status: res.status,
     };
-  } catch {
-    return { url, finalUrl: url, hasLoginForm: false, htmlSample: '' };
+  } catch (err) {
+    return {
+      url,
+      finalUrl: url,
+      hasLoginForm: false,
+      htmlSample: '',
+      fetchError: classifyFetchError(err),
+    };
   } finally {
     clearTimeout(timeout);
   }
+}
+
+/** Maps undici/Node fetch errors to a small set of reasons. */
+export function classifyFetchError(err: unknown): PageFetchError {
+  const e = err as { name?: string; code?: string; cause?: { code?: string; name?: string } } | null;
+  const code = e?.cause?.code ?? e?.code ?? '';
+  const name = e?.name ?? e?.cause?.name ?? '';
+  if (name === 'AbortError' || name === 'TimeoutError' || code === 'UND_ERR_CONNECT_TIMEOUT') {
+    return 'timeout';
+  }
+  if (code === 'ENOTFOUND' || code === 'EAI_AGAIN') return 'dns';
+  if (/^(ECONNREFUSED|ECONNRESET|EHOSTUNREACH|ENETUNREACH|EPIPE|UND_ERR_SOCKET)$/.test(code)) {
+    return 'connection';
+  }
+  if (/CERT|SSL|TLS/i.test(code)) return 'tls';
+  return 'other';
 }

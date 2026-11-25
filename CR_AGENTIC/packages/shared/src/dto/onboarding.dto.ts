@@ -47,6 +47,25 @@ export interface PortalCandidateView {
   confidence: number;
   evidence: string[];
   source: PortalCandidateSource;
+  /** Student-facing name, e.g. "Student portal" or "Moodle e-learning". */
+  label?: string;
+  /** Hostname shown under the label instead of the full URL. */
+  host?: string;
+  /** Verified school portal that blocks our servers; the student signs in on the phone. */
+  blockedFromServer?: boolean;
+}
+
+/** A URL discovery found but did not show, with a student-facing reason. */
+export interface HiddenPortalView {
+  host: string;
+  reason:
+    | 'unreachable'
+    | 'http_error'
+    | 'no_login_signal'
+    | 'other_country'
+    | 'other_school'
+    | 'cms_login';
+  message: string;
 }
 
 /**

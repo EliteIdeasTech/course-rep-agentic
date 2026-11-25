@@ -5,7 +5,11 @@ import {
   getKnownStudentPortalUrl,
 } from '@cr-agentic/database';
 import { createLogger, writeAuditLog } from '@cr-agentic/observability';
-import { PortalDiscoveryService, PortalCandidateResult } from '@cr-agentic/portal-discovery';
+import {
+  PortalDiscoveryService,
+  PortalCandidateResult,
+  HiddenCandidate,
+} from '@cr-agentic/portal-discovery';
 import { LmsType, portalMatchKey } from '@cr-agentic/shared';
 import type { DiscoveryFindPortalJob } from '@cr-agentic/shared';
 
@@ -29,16 +33,17 @@ export class FindPortalProcessor {
         universityName: session.universityName,
       });
 
-      let candidates = await this.discovery.discover({
+      const detailed = await this.discovery.discoverDetailed({
         universityName: job.data.universityName,
         country: job.data.country,
         website: job.data.website,
         knownPortalUrl: knownPortalUrl ?? undefined,
       });
 
-      candidates = this.ensureKnownPortalFirst(candidates, knownPortalUrl);
+      const candidates = this.ensureKnownPortalFirst(detailed.candidates, knownPortalUrl);
 
       await this.persistCandidates(onboardingSessionId, candidates);
+      await this.persistHidden(onboardingSessionId, detailed.hidden);
 
       // The user may have confirmed a portal while discovery was running.
       // Only move the session forward if it is still discovering.
@@ -60,6 +65,8 @@ export class FindPortalProcessor {
         OnboardingStage.PORTAL_SUGGESTED,
         {
           candidateCount: candidates.length,
+          hiddenCount: detailed.hidden.length,
+          hiddenReasons: detailed.hidden.map((h) => `${h.host}:${h.reason}`),
           knownPortalUrl: knownPortalUrl ?? null,
         },
       );
@@ -130,11 +137,36 @@ export class FindPortalProcessor {
       : {
           loginUrl: knownPortalUrl,
           portalName: 'Known student portal',
+          label: 'Student portal',
           lmsType: LmsType.GENERIC,
           confidence: 0.99,
           evidence: ['known-good-portal:5+ successful logins'],
         };
     return [head, ...rest];
+  }
+
+  /** Keeps "why hidden" on the session so the app can say "2 links hidden". */
+  private async persistHidden(
+    onboardingSessionId: string,
+    hidden: HiddenCandidate[],
+  ): Promise<void> {
+    const session = await prisma.onboardingSession.findUnique({
+      where: { id: onboardingSessionId },
+      select: { metadata: true },
+    });
+    const metadata = (session?.metadata as Record<string, unknown> | null) ?? {};
+    await prisma.onboardingSession.update({
+      where: { id: onboardingSessionId },
+      data: {
+        metadata: {
+          ...metadata,
+          portalDiscovery: {
+            verifiedAt: new Date().toISOString(),
+            hidden: hidden.map((h) => ({ host: h.host, reason: h.reason, message: h.message })),
+          },
+        },
+      },
+    });
   }
 
   /**
@@ -166,6 +198,7 @@ export class FindPortalProcessor {
             lmsType: c.lmsType,
             confidence: c.confidence,
             evidence: c.evidence,
+            metadata: candidateMetadata(c),
           },
         });
         continue;
@@ -179,6 +212,7 @@ export class FindPortalProcessor {
           confidence: c.confidence,
           evidence: c.evidence,
           source: 'WEB_SEARCH' as const,
+          metadata: candidateMetadata(c),
         },
       });
     }
@@ -192,4 +226,11 @@ export class FindPortalProcessor {
         .catch((err) => logger.warn({ onboardingSessionId, err: String(err) }, 'stale candidate cleanup failed'));
     }
   }
+}
+
+function candidateMetadata(c: PortalCandidateResult): { label?: string; blockedFromServer?: boolean } {
+  return {
+    ...(c.label ? { label: c.label } : {}),
+    ...(c.evidence.includes('blocked from our servers') ? { blockedFromServer: true } : {}),
+  };
 }
