@@ -1,6 +1,7 @@
 import type { Page } from 'playwright';
 import Redis from 'ioredis';
-import { prisma, OnboardingStage, recordOnboardingTransition } from '@cr-agentic/database';
+import { prisma, OnboardingStage, recordFunnelEvent, recordOnboardingTransition } from '@cr-agentic/database';
+import { classifyFunnelError } from '@cr-agentic/shared';
 import { createLogger, writeAuditLog } from '@cr-agentic/observability';
 import { enqueueJob } from '@cr-agentic/queue';
 import { QUEUE_NAMES } from '@cr-agentic/shared';
@@ -188,6 +189,18 @@ export class DeepScrapeProcessor {
           { err, onboardingSessionId, phase },
           'Deep scrape phase failed; continuing to next phase',
         );
+        const c = classifyFunnelError(err);
+        await recordFunnelEvent({
+          sessionId: onboardingSessionId,
+          event: 'failed',
+          step: 'importing',
+          reason: c.reason === 'unknown' ? 'page_structure_changed' : c.reason,
+          rawReason: `deep_scrape_${phase}_failed`,
+          errorClass: c.errorClass,
+          message: c.message,
+          source: 'discovery_worker',
+          metadata: { phase },
+        });
       }
 
       await writeAuditLog({
@@ -221,7 +234,20 @@ export class DeepScrapeProcessor {
         where: { id: data.connectedAccountId },
         data: { discoveryStatus: 'COMPLETE' },
       }).catch(() => undefined);
-      logger.info({ onboardingSessionId: data.onboardingSessionId }, 'Deep scrape complete');
+      const courseCount = await prisma.discoveredCourse
+        .count({ where: { onboardingSessionId: data.onboardingSessionId } })
+        .catch(() => -1);
+      if (courseCount === 0) {
+        await recordFunnelEvent({
+          sessionId: data.onboardingSessionId,
+          event: 'failed',
+          step: 'importing',
+          reason: 'import_empty',
+          rawReason: 'deep_scrape_no_courses',
+          source: 'discovery_worker',
+        });
+      }
+      logger.info({ onboardingSessionId: data.onboardingSessionId, courseCount }, 'Deep scrape complete');
       return;
     }
     await enqueueJob<DiscoveryDeepScrapeJob>(
