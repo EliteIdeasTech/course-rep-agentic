@@ -9,10 +9,12 @@ import { sessionStorageProvider } from './session-storage.provider';
 import { AuthModule } from '../auth/auth.module';
 import { NotificationsModule } from '../notifications/notifications.module';
 import { BackgroundImportService } from './background-import.service';
+import { PortalFunnelAdminController } from './portal-funnel-admin.controller';
+import { FunnelErrorInterceptor } from './funnel-error.interceptor';
 
 @Module({
   imports: [AuthModule, NotificationsModule],
-  controllers: [OnboardingController],
+  controllers: [OnboardingController, PortalFunnelAdminController],
   providers: [
     OnboardingService,
     PortalService,
@@ -20,6 +22,7 @@ import { BackgroundImportService } from './background-import.service';
     DeepDiscoveryService,
     SyncService,
     BackgroundImportService,
+    FunnelErrorInterceptor,
     sessionStorageProvider,
   ],
   exports: [OnboardingService],

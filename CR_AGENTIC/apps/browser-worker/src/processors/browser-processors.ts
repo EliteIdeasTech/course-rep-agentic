@@ -1,3 +1,4 @@
+import { sanitizeFunnelMessage } from '@cr-agentic/shared';
 import { Job, UnrecoverableError } from 'bullmq';
 import { prisma, OnboardingStage, recordOnboardingTransition, recordSuccessfulPortalLogin } from '@cr-agentic/database';
 import { createLogger, writeAuditLog, metrics, startSpan } from '@cr-agentic/observability';
@@ -301,7 +302,8 @@ export class BrowserProcessors {
         await this.finishCredentialLogin(sessionId, OnboardingStage.REAUTH_REQUIRED, {
           reason: unreachable ? 'portal_unreachable' : 'credential_login_error',
           portalHost,
-          message: message.slice(0, 300),
+          errorClass: err instanceof Error ? (err.name !== 'Error' ? err.name : err.constructor.name) : typeof err,
+          message: sanitizeFunnelMessage(message),
         }, log).catch(() => undefined);
         metrics.increment('browser.credential_login.failure');
         // Credentials are already deleted: a retry can only fail. Do not retry.

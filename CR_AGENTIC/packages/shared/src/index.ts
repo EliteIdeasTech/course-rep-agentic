@@ -8,3 +8,4 @@ export * from './onboarding/login-outcome';
 export * from './onboarding/portal-url';
 export * from './onboarding/school-input';
 export * from './onboarding/test-account';
+export * from './onboarding/portal-funnel';

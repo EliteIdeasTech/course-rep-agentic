@@ -5,6 +5,7 @@ import {
   Headers,
   Param,
   Post,
+  UseInterceptors,
 } from '@nestjs/common';
 import { ApiBearerAuth, ApiHeader, ApiTags } from '@nestjs/swagger';
 import { TEST_ACCOUNT_HEADER } from '@cr-agentic/shared';
@@ -16,8 +17,11 @@ import { LoginService } from './login.service';
 import { DeepDiscoveryService } from './deep-discovery.service';
 import { SyncService } from './sync.service';
 import { BackgroundImportService } from './background-import.service';
+import { FunnelErrorInterceptor } from './funnel-error.interceptor';
 import {
   ApplyResultsRequestDto,
+  CancelOnboardingRequestDto,
+  ClientFunnelEventDto,
   ConfirmPortalRequestDto,
   CourseImportSelectionDto,
   CredentialLoginRequestDto,
@@ -29,6 +33,7 @@ import {
 @ApiTags('onboarding')
 @ApiBearerAuth()
 @Controller('onboarding')
+@UseInterceptors(FunnelErrorInterceptor)
 export class OnboardingController {
   constructor(
     private readonly onboarding: OnboardingService,
@@ -107,10 +112,26 @@ export class OnboardingController {
   async cancel(
     @CurrentUser('id') userId: string | undefined,
     @Param('sessionId') sessionId: string,
+    @Body() dto: CancelOnboardingRequestDto = {},
     @Headers('x-onboarding-guest-token') guestToken?: string,
   ) {
     const actor = await this.login.resolveActor(sessionId, userId, guestToken);
-    return this.onboarding.cancel(actor, sessionId);
+    return this.onboarding.cancel(actor, sessionId, dto ?? {});
+  }
+
+  /**
+   * Client-reported funnel step or failure (start_failed with error class,
+   * credentials_submitted, login_poll_timeout, ...). Never send credentials.
+   */
+  @Post(':sessionId/events')
+  async funnelEvent(
+    @CurrentUser('id') userId: string | undefined,
+    @Param('sessionId') sessionId: string,
+    @Body() dto: ClientFunnelEventDto,
+    @Headers('x-onboarding-guest-token') guestToken?: string,
+  ) {
+    const actor = await this.login.resolveActor(sessionId, userId, guestToken);
+    return this.onboarding.recordClientEvent(actor, sessionId, dto);
   }
 
   @Post(':sessionId/discover-portal')
